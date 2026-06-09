@@ -880,11 +880,14 @@ def build(db: Path, out: Path) -> None:
     (out / _JS_NAME).write_text(SCRIPT, "utf-8")     #   browser/CDN never serve a
     #   stale asset; the <link>/<script> hrefs carry the same hash (see page()).
     for old in out.glob("style.*.css"):              # drop superseded hashed assets
-        if old.name != _CSS_NAME: old.unlink()
+        if old.name != _CSS_NAME:
+            old.unlink()
     for old in out.glob("script.*.js"):
-        if old.name != _JS_NAME: old.unlink()
+        if old.name != _JS_NAME:
+            old.unlink()
     for bare in ("style.css", "script.js"):          # drop pre-hash leftovers (old cache)
-        if (out / bare).exists(): (out / bare).unlink()
+        if (out / bare).exists():
+            (out / bare).unlink()
     # drop the obsolete per-month sort variants (the date/threaded/author switcher
     # was removed -- only {m}.html / frag/{m}.html remain). Stale files survive in
     # the cache-restored site/, so prune them so they don't linger on the deploy.
