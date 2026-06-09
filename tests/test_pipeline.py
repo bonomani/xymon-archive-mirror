@@ -87,6 +87,25 @@ def test_text_pseudonymises_nonallowlisted_xymon_com():
     assert "henrik@xymon.com" not in out and "@xymon.invalid" in out
 
 
+def test_text_masks_obfuscated_address_forms():
+    # scraper-dodging forms are reversible -> must be masked, not just plain @ (#1).
+    _t, _b, text, _n, blob = obfuscate.make_repl(SALT)
+    for s, leak in [
+        ("0500a8c0 (at) noip.org", "noip.org"),               # (at)
+        ("user [at] example.org", "example.org"),             # [at]
+        ("bgmilne%40staff.telkomsa.net", "telkomsa"),         # %40
+        ("foo (at)\n      mail.gmail.com", "mail.gmail.com"),  # wrapped (at)
+        ("erdmann at daimler dot com", "daimler"),            # word dot
+        ("parker AT uregina DOT ca", "uregina"),              # caps
+        ('"alias"@example.org', "example.org"),               # quoted local
+        ("msgid@[207.242.93.105]", "207.242"),                # domain literal
+    ]:
+        out = text(s)
+        assert leak not in out and "@xymon.invalid" in out, (s, out)
+    assert text("available at sourceforge.net") == "available at sourceforge.net"
+    assert b"telkomsa" not in blob(b"a bgmilne%40staff.telkomsa.net b")
+
+
 def test_text_pseudonym_exemption_requires_exact_match():
     # "xymon.invalid" merely appearing in the local part must NOT exempt a real
     # address; only an exact user-<hex>@xymon.invalid pseudonym is kept (#3).

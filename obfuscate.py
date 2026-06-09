@@ -39,7 +39,10 @@ _DEFAULT = "xymon-archive-public-fallback-salt"   # weak; set a real one
 LIST_DOMAIN = "xymon.com"             # public list/infra address -> kept as-is
 PSEUDO_DOMAIN = "xymon.invalid"       # real addresses map to user-<h>@<this>
 # canonical e-mail-address shape, one source of truth for text + bytes scans.
-_ADDR = r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}"
+# Local may be a quoted-string ("john doe"@x); domain may be a literal ([1.2.3.4]
+# / [IPv6:..]) -- both are valid, reversible addresses that must be masked too.
+_ADDR = (r'(?:"[^"@\n]{1,64}"|[A-Za-z0-9._%+\-]+)'
+         r'@(?:[A-Za-z0-9.\-]+\.[A-Za-z]{2,}|\[[0-9A-Fa-f:.]{3,45}\])')
 _T = re.compile(_ADDR)
 _B = re.compile(_ADDR.encode())
 _KEEP = (f"@{LIST_DOMAIN}", f"@{PSEUDO_DOMAIN}")
@@ -100,6 +103,29 @@ _AT_BR_B = re.compile(
 # into the pseudonym. Restore the boundary before a glued URL scheme first.
 _GLUE = re.compile(r"(?<=[\w.@])(?=https?://)")
 _GLUE_B = re.compile(rb"(?<=[\w.@])(?=https?://)")
+
+# Deliberate scraper-dodging address forms that are still reversible and MUST be
+# masked: "@" written as %40 or (at)/[at]/{at}; "." written as (dot)/[dot]/{dot}
+# or the word " dot ". High-confidence markers (brackets/%40) are masked
+# unconditionally; the ambiguous bare word " at " keeps the _AT_STOP prose guard.
+# Whitespace (incl. a wrapped newline) is allowed around the markers.
+_OBF_AT_HI = r"[\(\[\{]\s*at\s*[\)\]\}]|%40"
+_OBF_DOTM = r"[\(\[\{]\s*dot\s*[\)\]\}]|\s+dot\s+|\."
+_OBF_LOCAL = r"[A-Za-z0-9._+\-]+"        # no % (so %40 reads as the @ marker)
+_OBF_DOM = rf"(?:[A-Za-z0-9\-]+\s*(?:{_OBF_DOTM})\s*)+[A-Za-z]{{2,}}"
+_OBF = re.compile(
+    rf"(?<![\w.%+\-])({_OBF_LOCAL})\s*(?:({_OBF_AT_HI})|\s+at\s+)\s*({_OBF_DOM})",
+    re.I)
+_OBF_B = re.compile(_OBF.pattern.encode(), re.I)
+_OBF_HASDOT = re.compile(r"\bdot\b|[\(\[\{]\s*dot", re.I)   # word/bracket "dot"
+
+
+def _obf_canon(s: str) -> str:
+    """An _OBF match -> canonical 'local@domain' (markers normalised, lowercased)."""
+    s = re.sub(_OBF_AT_HI, "@", s, flags=re.I)
+    s = re.sub(r"\s+at\s+", "@", s, flags=re.I)
+    s = re.sub(r"[\(\[\{]\s*dot\s*[\)\]\}]|\s+dot\s+", ".", s, flags=re.I)
+    return re.sub(r"\s", "", s).lower()
 
 
 def get_salt() -> bytes:
@@ -174,10 +200,36 @@ def make_repl(salt: bytes):
             return m.group(0)
         return _pseudo(addr.decode("ascii", "replace"), salt).encode()
 
-    def text(s):                                   # @ and "at" forms, in text
+    def _obf_mask(canon, hi_present, dom_str) -> bool:
+        # A bare " at " with a literal-dot domain is the classic pipermail form --
+        # leave it to the _AT handler (prose stoplist + pseudonym-tail guard); _OBF
+        # OWNS only the marker forms and the word/bracket "dot" forms.
+        if not hi_present and not _OBF_HASDOT.search(dom_str):
+            return False                           # defer to _AT (leave unchanged)
+        if not hi_present and canon.split("@", 1)[0] in _AT_STOP:
+            return False                           # prose word -> keep
+        if canon in LIST_ALLOWLIST or _PSEUDO_AT.match(canon):
+            return False
+        return True                                # mask
+
+    def obf_repl(m):                               # (at)/[at]/%40/"dot" forms
+        canon = _obf_canon(m.group(0))
+        if _obf_mask(canon, m.group(2) is not None, m.group(3)):
+            return _pseudo(canon, salt)
+        return m.group(0)
+
+    def obf_repl_b(m):
+        canon = _obf_canon(m.group(0).decode("ascii", "replace"))
+        dom = m.group(3).decode("ascii", "replace")
+        if _obf_mask(canon, m.group(2) is not None, dom):
+            return _pseudo(canon, salt).encode()
+        return m.group(0)
+
+    def text(s):                                   # @, "at" and obfuscated forms
         if not s:
             return s
         s = _GLUE.sub(" ", s)                      # un-glue a run-together URL
+        s = _OBF.sub(obf_repl, s)                  # (at)/[at]/%40/dot -> pseudonym
         return _AT.sub(at_t, _AT_BR.sub(at_br, _T.sub(repl_t, s)))
 
     def name(s):                                   # from_name: also whole plain at-addr
@@ -185,10 +237,11 @@ def make_repl(salt: bytes):
             return _pseudo(s.strip().lower().replace(" at ", "@", 1), salt)
         return text(s)
 
-    def blob(b):                                   # @ and "at" forms, in bytes
+    def blob(b):                                   # @, "at" and obfuscated forms
         if not b:
             return b
         b = _GLUE_B.sub(b" ", b)                   # un-glue a run-together URL
+        b = _OBF_B.sub(obf_repl_b, b)
         return _AT_B.sub(at_b, _AT_BR_B.sub(at_br_b, _B.sub(repl_b, b)))
 
     return repl_t, repl_b, text, name, blob
