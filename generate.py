@@ -885,6 +885,13 @@ def build(db: Path, out: Path) -> None:
         if old.name != _JS_NAME: old.unlink()
     for bare in ("style.css", "script.js"):          # drop pre-hash leftovers (old cache)
         if (out / bare).exists(): (out / bare).unlink()
+    # drop the obsolete per-month sort variants (the date/threaded/author switcher
+    # was removed -- only {m}.html / frag/{m}.html remain). Stale files survive in
+    # the cache-restored site/, so prune them so they don't linger on the deploy.
+    for sub in (out, out / "frag"):
+        for pat in ("*-date.html", "*-author.html", "*-thread.html"):
+            for old in sub.glob(pat):
+                old.unlink()
 
     # attachments grouped by their message (msgid)
     atts_by_msgid: dict[str, list] = defaultdict(list)
