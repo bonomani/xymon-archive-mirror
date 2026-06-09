@@ -400,6 +400,19 @@ def message_to_row(msg: Message, month: Optional[str] = None,
         month = dt.strftime("%Y-%B") if dt else "unknown"
     return {
         "month": month,
+        # Message-Id / In-Reply-To are kept verbatim (outer-whitespace-stripped
+        # only), NOT canonicalised. They are exact-match keys for dedup (the msgid
+        # UNIQUE constraint) and for threading (in_reply_to == msgid), so in
+        # principle a folded/whitespace/case variant of the same id could miss a
+        # dedup or break a reply link. Deliberately left as-is: msgid is also the
+        # permalink key and the obfuscation input, so normalising at STORE time
+        # would renumber existing permalinks. Measured impact on the live corpus is
+        # marginal -- 0 missed duplicates, and 16 of 33k reply links unrepaired,
+        # all from one 2005 X.400 "@MHS" gateway whose ids were header-folded with
+        # an embedded newline (case variants already collapse, since obfuscate.py
+        # lowercases the address before hashing). If those links ever matter,
+        # normalise only at COMPARISON time in threads.py (strip <>, collapse
+        # internal whitespace), never the stored value.
         "msgid": (msg.get("Message-Id") or "").strip() or None,
         "in_reply_to": (msg.get("In-Reply-To") or "").strip() or None,
         "subject": normalize_subject(decode_mime(msg.get("Subject", ""))),
