@@ -82,7 +82,8 @@ def main(argv=None) -> None:
             cache.execute("ALTER TABLE html ADD COLUMN raw_html TEXT")
         if "raw_bytes" not in cols:                 # byte-exact HTTP response
             cache.execute("ALTER TABLE html ADD COLUMN raw_bytes BLOB")
-        have = dict(cache.execute("SELECT url, body_html FROM html"))
+        have = {u: (bh, rh) for u, bh, rh in
+                cache.execute("SELECT url, body_html, raw_html FROM html")}
 
     # one-off backfill: cached rows pre-date raw_bytes and the normal loop skips
     # cached urls, so they would never get it. Re-fetch just the byte-exact body.
@@ -105,8 +106,13 @@ def main(argv=None) -> None:
     done = cached = 0
     for mid, url in targets:
         if url in have:                       # served from the vault cache
+            bhtml, rhtml = have[url]
+            # Re-sanitize from the preserved decoded source so the CURRENT
+            # sanitizer (and any later fix to it) always applies; fall back to the
+            # stored body_html only for legacy rows that pre-date raw_html.
+            fresh = mailstore.sanitize_html(depipermail(rhtml)) if rhtml else None
             conn.execute("UPDATE message SET body_html=? WHERE id=?",
-                         (have[url], mid))
+                         (fresh or bhtml, mid))
             cached += 1
             continue
         if args.no_network:                   # offline: cache restore only

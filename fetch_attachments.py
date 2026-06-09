@@ -22,6 +22,7 @@ import argparse
 import re
 import sqlite3
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -39,13 +40,36 @@ KEEP = {
 URL_RE = re.compile(r"URL:\s*<([^>]+)>", re.S)
 UA = "xymon-discussion-public/1.0 (+attachments)"
 
+# Attachment URLs come from message bodies (attacker-influenced), so a fetch is
+# locked down: only the archive host, HTTPS only, no redirects (an open redirect
+# could reach an internal address), and a hard response-size cap. This keeps the
+# crawler from being turned into an SSRF probe or a memory/repo-exhaustion vector.
+_ALLOWED_HOSTS = frozenset(("lists.xymon.com",))
+_MAX_BYTES = 25 * 1024 * 1024            # 25 MB ceiling per attachment
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):  # noqa: ARG002
+        return None                       # refuse every redirect
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
 
 def httpget(url: str, timeout: int = 60):
-    """GET ``url`` with our User-Agent. Returns ``(body_bytes, headers)`` so
-    callers can read Content-Type / charset off the response."""
-    resp = urllib.request.urlopen(
+    """GET ``url`` with our User-Agent. Returns ``(body_bytes, headers)``.
+
+    Hardened: HTTPS + allowlisted host only, redirects refused, body capped at
+    ``_MAX_BYTES`` (these URLs are attacker-influenced -- see module note)."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme != "https" or (parts.hostname or "").lower() not in _ALLOWED_HOSTS:
+        raise ValueError(f"refusing non-allowlisted attachment URL: {url}")
+    resp = _OPENER.open(
         urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
-    return resp.read(), resp.headers
+    data = resp.read(_MAX_BYTES + 1)
+    if len(data) > _MAX_BYTES:
+        raise ValueError(f"attachment exceeds {_MAX_BYTES} bytes: {url}")
+    return data, resp.headers
 
 
 def fix_url(u: str) -> str:

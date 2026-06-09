@@ -545,3 +545,50 @@ def test_render_plain_reattaches_wrapped_quote():
             "> > more text\n")
     out = render_body.render_plain(body)
     assert "<pre>wildcards as well</pre>" not in out
+
+
+# --- #4 fetch_attachments SSRF hardening -------------------------------------
+
+def test_fetch_attachments_rejects_unsafe_urls():
+    import fetch_attachments
+    for bad in ("http://lists.xymon.com/x",            # not https
+                "https://evil.com/x",                  # wrong host
+                "https://lists.xymon.com.evil.com/x",  # suffix trick
+                "ftp://lists.xymon.com/x"):            # wrong scheme
+        raised = False
+        try:
+            fetch_attachments.httpget(bad)
+        except ValueError:
+            raised = True
+        assert raised, bad
+
+
+# --- #5 cached scrubbed HTML is re-sanitized from raw_html --------------------
+
+def test_scrubbed_html_resanitizes_from_cache(tmp_path):
+    import fetch_scrubbed_html as fsh
+    url = ("https://lists.xymon.com/xymon/attachments/"
+           "20200101/abc/attachment.html")
+    db = tmp_path / "a.db"
+    conn = mailstore.connect(str(db))
+    conn.execute(
+        "INSERT INTO message (msgid, month, body) VALUES (?,?,?)",
+        ("m1", "2020-01",
+         f"-------------- next part --------------\n... scrubbed ...\nURL: <{url}>\n"))
+    conn.commit()
+    conn.close()
+    cache = tmp_path / "scrubbed_html.db"
+    cc = sqlite3.connect(str(cache))
+    cc.execute("CREATE TABLE html (url TEXT PRIMARY KEY, body_html TEXT, "
+               "raw_html TEXT, raw_bytes BLOB)")
+    cc.execute("INSERT INTO html (url, body_html, raw_html) VALUES (?,?,?)",
+               (url, "STALE-CACHED", "<p>hi</p><script>evil()</script>"))
+    cc.commit()
+    cc.close()
+    fsh.main(["--db", str(db), "--cache", str(cache), "--no-network"])
+    conn = mailstore.connect(str(db))
+    got = conn.execute(
+        "SELECT body_html FROM message WHERE msgid='m1'").fetchone()[0]
+    conn.close()
+    assert got and "STALE-CACHED" not in got and "<script" not in got.lower()
+    assert "hi" in got
