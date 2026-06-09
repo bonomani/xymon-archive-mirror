@@ -72,7 +72,7 @@ pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
 .msg>.md{border:0;border-radius:0;padding:0}
 .pt pre{white-space:pre-wrap;background:transparent;border:0;border-radius:0;
     padding:0;margin:0;overflow:auto}
-.pt blockquote{margin:6px 0 6px 1px;padding-left:10px;
+.pt blockquote{margin:6px 0 6px 6px;padding-left:7px;
     border-left:2px solid #ccc;color:#555}
 .md{background:#fff;border:1px solid #e3e3e3;padding:14px;border-radius:6px}
 .md pre{background:#f6f8fa} .md img{max-width:100%}
