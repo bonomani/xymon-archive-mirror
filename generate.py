@@ -69,12 +69,12 @@ pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
 .copytext:hover{background:#dcebdc}
 .tmsg[open]>summary{border-bottom:1px solid #eee;margin-bottom:8px}
 .msg h1{margin-top:10px}
-.msg>.md{border:0;border-radius:0;padding:0}
+.msg>.pt,.msg>.md{border:0;border-radius:0;padding:0}
 .pt pre{white-space:pre-wrap;background:transparent;border:0;border-radius:0;
     padding:0;margin:0;overflow:auto}
 .pt blockquote{margin:6px 0 6px 6px;padding-left:7px;
     border-left:2px solid #ccc;color:#555}
-.md{background:#fff;border:1px solid #e3e3e3;padding:14px;border-radius:6px}
+.pt,.md{background:#fff;border:1px solid #e3e3e3;padding:14px;border-radius:6px}
 .md pre{background:#f6f8fa} .md img{max-width:100%}
 /* one rhythm everywhere: blocks have no margin, so spacing comes only from
    line-height and the single <br> blank lines kept by the sanitizer */
