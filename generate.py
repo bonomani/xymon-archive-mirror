@@ -4,8 +4,7 @@
 Layout produced under ``site/``::
 
     index.html               years -> months with counts
-    <YYYY-Month>.html        one month, messages by date
-    <YYYY-Month>-thread.html one month, threaded (by reply)
+    <YYYY-Month>.html        one month, messages by date (the only month view)
     thread/<tid>.html        one thread, all messages (a message's permalink is
                              thread/<tid>.html#m-<id>; there are no per-msg pages)
 """
@@ -49,7 +48,6 @@ pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
 .mgrid a{text-decoration:none} .mgrid a.mgactive{font-weight:600;text-decoration:underline}
 .mgrid span{color:#bbb}
 .mpanel{margin:0 0 16px;padding:6px 0 0;border-top:1px solid #e3e3e3} .mpanel ul{margin:6px 0}
-.sortlink{cursor:pointer;color:#338a3a;text-decoration:underline}
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
     color:#fff;background:#888;margin-right:6px;vertical-align:1px}
 .badge.github{background:#24292f} .badge.list,.badge.imap{background:#338a3a}
@@ -800,15 +798,8 @@ document.querySelectorAll('.years .mgrid a[data-m]').forEach(function(a){
     if (open === a && !panel.hidden){ panel.hidden = true; a.classList.remove('mgactive'); return; }
     if (open) open.classList.remove('mgactive');
     a.classList.add('mgactive');
-    panel.hidden = false; loadFrag(panel, a.dataset.m + '-date');  // by date by default
+    panel.hidden = false; loadFrag(panel, a.dataset.m);  // messages by date
   });
-});
-document.addEventListener('click', function(e){          // in-panel sort switch
-  var s = e.target.closest ? e.target.closest('.sortlink') : null;
-  if (!s) return;
-  e.preventDefault();
-  var panel = s.closest('.mpanel');
-  if (panel) loadFrag(panel, s.dataset.frag);
 });
 </script>
 """
@@ -1141,15 +1132,10 @@ def build(db: Path, out: Path) -> None:
                     f"{short_date(r)}</span></li>")
             return f"<ul class=mlist>{out_}</ul>"
 
-        # the four Pipermail-style views: (file suffix, label, rendered body)
-        by_author = sorted(rows, key=lambda r: (whom(r).lower(), _sortkey(r)))
-        # order doubles as the accordion/nav order; suffix "" (m.html) stays
-        # threaded. "by subject" dropped (redundant with threaded).
-        views = [
-            ("-date", "by date", flat_list(rows)),
-            ("", "threaded", render_threads(rows, att_counts)),
-            ("-author", "by author", flat_list(by_author)),
-        ]
+        # Single view: messages by date. The sort switcher (date / threaded /
+        # by author) was removed -- only date remains. The threaded view of a
+        # conversation still lives on its own thread/<id>.html page.
+        content = flat_list(rows)
 
         # downloadable mbox: original message bytes in date order
         raws = [rb for (rb,) in conn.execute(
@@ -1162,26 +1148,14 @@ def build(db: Path, out: Path) -> None:
             (out / f"{m}.txt.gz").write_bytes(gzip.compress(mbox, 9))
             mbox_link = f" &middot; <a href='{e(m)}.txt.gz'>mbox.gz</a>"
 
-        for suffix, label, content in views:
-            nav = "<p class=meta>" + " &middot; ".join(
-                (f"<b>{lbl}</b>" if lbl == label
-                 else f"<a href='{e(m)}{sfx}.html'>{lbl}</a>")
-                for sfx, lbl, _ in views)
-            nav += (f"{mbox_link} &middot; "
-                    f"<a href='index.html'>&larr; index</a></p>")
-            mbody = (f"<h1>{e(m)}</h1><p class=meta>{len(rows)} messages</p>"
-                     f"{nav}{content}{nav}")
-            (out / f"{m}{suffix}.html").write_text(
-                page(f"Xymon {m} ({label})", mbody), "utf-8")
-
-            # accordion fragment: same view + an in-panel sort switcher (links
-            # handled by JS; msg/<id>.html resolve when injected at site root).
-            fnav = "<p class=meta>" + " &middot; ".join(
-                (f"<b>{lbl}</b>" if lbl == label
-                 else f"<a class=sortlink data-frag='{e(m)}{sfx}'>{lbl}</a>")
-                for sfx, lbl, _ in views) + f" &middot; {len(rows)} messages</p>"
-            (out / "frag" / f"{m}{suffix}.html").write_text(
-                fnav + content, "utf-8")
+        nav = (f"<p class=meta>{len(rows)} messages{mbox_link} &middot; "
+               f"<a href='index.html'>&larr; index</a></p>")
+        mbody = f"<h1>{e(m)}</h1>{nav}{content}{nav}"
+        (out / f"{m}.html").write_text(page(f"Xymon {m}", mbody), "utf-8")
+        # accordion fragment (loaded by the month index); msg/<id>.html links
+        # resolve when the fragment is injected at the site root.
+        (out / "frag" / f"{m}.html").write_text(
+            f"<p class=meta>{len(rows)} messages</p>{content}", "utf-8")
 
     # ---- thread pages: ONE page per thread, every message in order, each a
     # collapsible <details> block anchored #m-<id> (that anchor IS the message
