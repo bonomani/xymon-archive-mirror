@@ -88,7 +88,7 @@ reply; the substantive text still matches. Across the sample: **36/40 messages
 | **Attachments** | external URLs (depend on server) | code/patches/archives mirrored into the DB | **Mirror** |
 | **Threading** | per-month thread tree | reply ∪ subject, spans months, no split topics | **Mirror** |
 | **Date ordering** | local wall-clock per message | normalized to UTC (correct cross-TZ order) | **Mirror** |
-| **Navigation** | prev/next by thread | prev/next by thread (author·date) + search | tie/Mirror |
+| **Navigation** | prev/next by thread | per-month list (by date) + thread pages + search | tie/Mirror |
 | **Search** | none | subject+sender instant, opt-in deep full-text | **Mirror** |
 | **Permalinks** | sequence number (`048249.html`) | stable hash of Message-Id | **Mirror** |
 | **mbox download** | per-month `.txt.gz` (raw) | per-month `.txt.gz` (deduped, obfuscated) | tie |
