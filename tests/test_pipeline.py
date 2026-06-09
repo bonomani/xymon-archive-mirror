@@ -1,0 +1,467 @@
+"""Unit tests for the bug-prone pure functions of the archive pipeline.
+
+These lock in fixes we actually shipped: charset mojibake, catastrophic regex
+backtracking, attachment-address leaks, the @xymon.com override path, name
+normalisation, and quoted-reply / bullet rendering.
+"""
+import time
+from email import message_from_string
+
+import hashlib
+import sqlite3
+
+import mailstore
+import obfuscate
+import generate
+import render_body
+import vaultcache
+import threads
+
+SALT = b"unit-test-salt"
+
+
+# --- mailstore.decode_payload -------------------------------------------------
+
+def test_decode_utf8():
+    assert mailstore.decode_payload("café".encode("utf-8"), "utf-8") == "café"
+
+
+def test_decode_cp1252_fallback():
+    # 0x96 is an en-dash in cp1252, invalid utf-8; no declared charset -> sniff
+    assert mailstore.decode_payload(b"a\x96b", None) == "a–b"
+
+
+def test_decode_meta_charset_hint():
+    payload = b'<meta charset="windows-1252">x\x96y'
+    assert "–" in mailstore.decode_payload(payload, None)
+
+
+def test_decode_declared_wins():
+    assert mailstore.decode_payload(b"a\x96b", "cp1252") == "a–b"
+
+
+# --- mailstore.sanitize_html / _EMPTY_BLOCK (no catastrophic backtracking) -----
+
+def test_empty_block_no_backtracking():
+    s = "<div>" + ("&nbsp;" * 400) + "</div>"
+    t0 = time.time()
+    out = mailstore.sanitize_html(s)
+    assert time.time() - t0 < 0.5            # was O(2^n) -> minutes
+    assert "div" not in out.lower()          # empty block collapsed away
+
+
+# --- mailstore.html_part (recover the detached HTML body) ----------------------
+
+def test_html_part_captures_attachment_html():
+    raw = (
+        "From: a@b.com\nSubject: t\n"
+        'Content-Type: multipart/mixed; boundary="B"\n\n'
+        "--B\nContent-Type: text/plain\n\nplain\n"
+        "--B\nContent-Type: text/html\n"
+        'Content-Disposition: attachment; filename="attachment.html"\n\n'
+        "<html><body><p>Hello <b>world</b></p></body></html>\n--B--\n"
+    )
+    out = mailstore.html_part(message_from_string(raw))
+    assert out and "Hello" in out and "<b>world</b>" in out
+
+
+# --- obfuscate.make_repl / _pseudo (pseudonymise, keep @xymon.com) -------------
+
+def test_text_pseudonymises_real_address():
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    out = text("mail alice@example.com end")
+    assert "alice@example.com" not in out and "@xymon.invalid" in out
+
+
+def test_text_keeps_allowlisted_list_address():
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    assert "xymon@xymon.com" in text("ping xymon@xymon.com")
+    assert "xymon-bounces@xymon.com" in text("from xymon-bounces@xymon.com")
+
+
+def test_text_pseudonymises_nonallowlisted_xymon_com():
+    # the whole @xymon.com domain is NOT exempt -- a personal/unknown address
+    # there is pseudonymised like any other (exact allowlist, not domain-wide).
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    out = text("mail henrik@xymon.com please")
+    assert "henrik@xymon.com" not in out and "@xymon.invalid" in out
+
+
+def test_text_pseudonym_exemption_requires_exact_match():
+    # "xymon.invalid" merely appearing in the local part must NOT exempt a real
+    # address; only an exact user-<hex>@xymon.invalid pseudonym is kept (#3).
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    out = text("victim.xymon.invalid at example.com")
+    assert "example.com" not in out and "@xymon.invalid" in out
+    out2 = text("mail victim.xymon.invalid@example.com")
+    assert "example.com" not in out2
+    kept = text("user-123456789abc@xymon.invalid")     # real pseudonym kept
+    assert kept == "user-123456789abc@xymon.invalid"
+
+
+def test_obfuscate_sanitizes_text_archive(tmp_path, monkeypatch):
+    # a TEXT member with an address inside a gz/zip/tar is invisible to the byte
+    # scanner -> sanitise the archive (scrub the member, rebuild) and publish the
+    # cleaned copy; a clean archive is left untouched (#1, refined).
+    import gzip as _gz
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "arch.db")
+    conn = mailstore.connect(db)
+    leaky = _gz.compress(b"config: admin = realname@acme-corp.com\n")
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES (?,?,?,?,?,?,?)",
+        ("<1@h>", "2024-01", "u", "dump.gz", "application/octet-stream",
+         len(leaky), leaky))
+    clean = _gz.compress(b"just some logs, nothing personal\n")
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES (?,?,?,?,?,?,?)",
+        ("<1@h>", "2024-01", "u2", "ok.gz", "application/octet-stream",
+         len(clean), clean))
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    rows = dict(sqlite3.connect(db).execute(
+        "SELECT filename, content FROM attachment"))
+    assert rows["dump.gz"] != obfuscate._WITHHELD       # sanitised, not withheld
+    inner = _gz.decompress(rows["dump.gz"])
+    assert b"acme-corp.com" not in inner and b"@xymon.invalid" in inner
+    assert rows["ok.gz"] == clean                       # untouched
+
+
+def test_obfuscate_withholds_binary_archive(tmp_path, monkeypatch):
+    # a BINARY member carrying an address can't be cleaned safely -> withhold.
+    import gzip as _gz
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "bin.db")
+    conn = mailstore.connect(db)
+    blob = _gz.compress(b"\x00\x01\x02 realname@acme-corp.com \x00\xff\xfe data")
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES (?,?,?,?,?,?,?)",
+        ("<1@h>", "2024-01", "u", "blob.gz", "application/octet-stream",
+         len(blob), blob))
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    (content,) = sqlite3.connect(db).execute(
+        "SELECT content FROM attachment").fetchone()
+    assert content == obfuscate._WITHHELD
+
+
+def _att(conn, fn, content, ct="application/octet-stream"):
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES (?,?,?,?,?,?,?)",
+        ("<1@h>", "2024-01", fn, fn, ct, len(content), content))
+
+
+def test_obfuscate_redacts_phone_in_text_attachment(tmp_path, monkeypatch):
+    # attachments must run redact_contact too, not just email replacement (#2).
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "p.db")
+    conn = mailstore.connect(db)
+    _att(conn, "contact.txt", b"call 801-446-5645 or mail joe@acme.com\n", "text/plain")
+    conn.commit(); conn.close()
+    obfuscate.obfuscate(db)
+    (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
+    assert b"801-446-5645" not in c and b"XXX-XXX-XXXX" in c
+    assert b"joe@acme.com" not in c and b"@xymon.invalid" in c
+
+
+def test_obfuscate_sanitizes_dupname_zip(tmp_path, monkeypatch):
+    # duplicate ZIP names must not hide the earlier (leaky) entry (#3): read by
+    # ZipInfo. Both entries get cleaned -> no address survives.
+    import io as _io, zipfile as _zip
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    buf = _io.BytesIO()
+    z = _zip.ZipFile(buf, "w")
+    z.writestr("dup.txt", b"secret leak@evil.com\n")
+    z.writestr("dup.txt", b"harmless\n")
+    z.close()
+    db = str(tmp_path / "z.db")
+    conn = mailstore.connect(db)
+    _att(conn, "d.zip", buf.getvalue(), "application/zip")
+    conn.commit(); conn.close()
+    obfuscate.obfuscate(db)
+    (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
+    members = obfuscate._inspect(c)
+    assert members is not None
+    assert not any(obfuscate._member_unsafe(m) for m in members)   # leak gone
+    assert b"leak@evil.com" not in b"".join(members)
+
+
+def test_obfuscate_withholds_overdepth_archive(tmp_path, monkeypatch):
+    # nested beyond the depth cap can't be verified -> withhold (#3/#6).
+    import gzip as _gz
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    data = b"deep joe@evil.com\n"
+    for _ in range(6):
+        data = _gz.compress(data)
+    db = str(tmp_path / "deep.db")
+    conn = mailstore.connect(db)
+    _att(conn, "deep.gz", data)
+    conn.commit(); conn.close()
+    obfuscate.obfuscate(db)
+    (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
+    assert c == obfuscate._WITHHELD
+
+
+def test_obfuscate_withholds_over_member_limit(tmp_path, monkeypatch):
+    # too many members (archive-bomb guard) -> withhold (#6).
+    import io as _io, zipfile as _zip
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    monkeypatch.setattr(obfuscate, "_ARCH_MAX_MEMBERS", 3)
+    buf = _io.BytesIO()
+    z = _zip.ZipFile(buf, "w")
+    for i in range(10):
+        z.writestr(f"f{i}.txt", b"x@acme.com\n")
+    z.close()
+    db = str(tmp_path / "many.db")
+    conn = mailstore.connect(db)
+    _att(conn, "many.zip", buf.getvalue(), "application/zip")
+    conn.commit(); conn.close()
+    obfuscate.obfuscate(db)
+    (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
+    assert c == obfuscate._WITHHELD
+
+
+def test_obfuscate_scrubs_attachment_metadata(tmp_path, monkeypatch):
+    # filename is rendered and url ships in the published DB -> an address in
+    # either must be pseudonymised, not just msgid/content.
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "a.db")
+    conn = mailstore.connect(db)
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES (?,?,?,?,?,?,?)",
+        ("<1@h>", "2024-01", "https://x/d?to=joe@acme.com",
+         "resume_jane.doe@gmail.com.pdf", "application/pdf", 3, b"abc"))
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    fn, url = sqlite3.connect(db).execute(
+        "SELECT filename, url FROM attachment").fetchone()
+    assert "jane.doe@gmail.com" not in fn and "@xymon.invalid" in fn
+    assert "joe@acme.com" not in url
+
+
+def test_pseudo_deterministic():
+    assert obfuscate._pseudo("x@y.com", SALT) == obfuscate._pseudo("x@y.com", SALT)
+    assert obfuscate._pseudo("x@y.com", SALT) != obfuscate._pseudo("z@y.com", SALT)
+
+
+def test_text_at_address_glued_phone():
+    # a list footer that glues a phone straight onto the TLD must NOT defeat the
+    # "user at host" matcher (a digit after a letter is not a \b) -- regression.
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    out = text("Developermichael.beatty at sherwin.com216-515-4000")
+    assert "sherwin.com" not in out and "@xymon.invalid" in out
+
+
+def test_blob_at_address_glued_phone():
+    _t, _b, _text, _name, blob = obfuscate.make_repl(SALT)
+    out = blob(b"> Developermichael.beatty at sherwin.com216-515-4000")
+    assert b"sherwin.com" not in out and b"@xymon.invalid" in out
+
+
+def test_text_repairs_overcaptured_pseudonym():
+    # the greedy address regex can grab junk after a pseudonym; obfuscate must
+    # repair the domain back to a bare xymon.invalid, never leave a routable
+    # suffix like @xymon.invalid.example.com (regression for the privacy gate).
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    for bad in ("user-123456789abc@xymon.invalid.example.com",
+                "user-123456789abc@xymon.invalid.cvf",
+                "user-123456789abc@xymon.invaliduser"):
+        out = text(bad)
+        assert "user-123456789abc@xymon.invalid" in out
+        assert "example.com" not in out and ".cvf" not in out
+        assert "invaliduser" not in out
+    out_b = _blob(b"x user-123456789abc@xymon.invalid.example.com y")
+    assert b"@xymon.invalid.example.com" not in out_b
+    assert b"user-123456789abc@xymon.invalid" in out_b
+
+
+def test_text_at_prose_kept():
+    # the TLD boundary change must not start eating prose the stoplist protects.
+    _t, _b, text, _name, _blob = obfuscate.make_repl(SALT)
+    assert text("available at sourceforge.net") == "available at sourceforge.net"
+    assert text("Look at xymonton.org") == "Look at xymonton.org"
+
+
+# --- obfuscate._needs_attachment_redaction ------------------------------------
+
+def test_redaction_text_type():
+    assert obfuscate._needs_attachment_redaction("text/plain", b"hi")
+
+
+def test_redaction_octet_stream_with_address():
+    assert obfuscate._needs_attachment_redaction(
+        "application/octet-stream", b"\x00 see joe@acme.com here")
+
+
+def test_redaction_binary_without_address():
+    assert not obfuscate._needs_attachment_redaction(
+        "image/png", b"\x89PNG\r\n\x00\x00 binary blob")
+
+
+def test_redaction_empty():
+    assert not obfuscate._needs_attachment_redaction("text/plain", b"")
+
+
+# --- generate._clean_name -----------------------------------------------------
+
+def test_clean_name_comma_swap():
+    assert generate._clean_name("Root, Paul T") == "Paul T Root"
+
+
+def test_clean_name_allcaps_surname():
+    assert generate._clean_name("Cédric BRINER") == "Cédric Briner"
+
+
+def test_clean_name_lowercase():
+    assert generate._clean_name("deepak deore") == "Deepak Deore"
+
+
+def test_clean_name_initials():
+    assert generate._clean_name("J.c. Cleaver") == "J.C. Cleaver"
+
+
+def test_clean_name_particles_kept_lower():
+    assert generate._clean_name("Stefan van der Walt") == "Stefan van der Walt"
+
+
+def test_clean_name_mixed_case_preserved():
+    assert generate._clean_name("Scot McConnell") == "Scot McConnell"
+
+
+# --- render_body.render_plain (bullets + wrapped-quote re-attach) -----------------
+
+_AVG3 = ("No virus found in this incoming message.\n"
+         "Checked by AVG - www.avg.com\n"
+         "Version: 8.5.420 / Virus Database: 270.14.3 - Release Date: 10/05/09\n")
+
+
+def test_strip_avg_variants():
+    cases = [
+        _AVG3,                                              # the canonical 3-liner
+        "> " + _AVG3.replace("\n", "\n> ").rstrip("> "),    # quoted in a reply
+        ("No virus found in this outgoing message.\n"       # wrapped onto 3 lines
+         "Checked by AVG - www.avg.com\nVersion: 9.0\n"
+         "Virus Database: 271\nRelease Date: 11/06/09\n"),
+        "Checked by AVG Free Edition\nVersion: 8.5\n",      # no intro line
+        _AVG3 + "\n" + _AVG3,                               # two blocks (real case)
+    ]
+    for c in cases:
+        out = render_body.strip_footer("Body kept.\n\n" + c)
+        assert "Body kept." in out
+        assert "AVG" not in out and "Virus Database" not in out, c
+
+
+def test_strip_avg_keeps_legit_virus_text():
+    # a message that genuinely discusses a virus must NOT be touched
+    body = "We caught a virus; the scanner database flagged it.\n"
+    assert "virus" in render_body.strip_footer(body)
+
+
+def test_render_plain_rejoins_orphan_bullet():
+    out = render_body.render_plain("intro\n\n  *\n\n    Beginner tutorials\n")
+    assert "• Beginner tutorials" in out
+
+
+# --- threads.components -------------------------------------------------------
+
+def test_threads_groups_by_reply_and_subject():
+    rows = [
+        {"id": 1, "msgid": "<a>", "in_reply_to": None, "subject": "Disk alert"},
+        {"id": 2, "msgid": "<b>", "in_reply_to": "<a>", "subject": "Re: x"},
+        {"id": 3, "msgid": "<c>", "in_reply_to": None, "subject": "Disk alert"},
+        {"id": 4, "msgid": "<d>", "in_reply_to": None, "subject": "unrelated"},
+    ]
+    comp = threads.components(rows)
+    sets = sorted(sorted(r["id"] for r in m) for m in comp.values())
+    assert [1, 2, 3] in sets        # 2 replies to 1; 3 shares subject with 1
+    assert [4] in sets              # 4 stands alone
+
+
+def test_threads_short_subject_not_grouped():
+    rows = [{"id": 1, "msgid": "<a>", "in_reply_to": None, "subject": "hi"},
+            {"id": 2, "msgid": "<b>", "in_reply_to": None, "subject": "hi"}]
+    assert len(threads.components(rows)) == 2   # 'hi' too short to thread
+
+
+# --- threads.thread_ids (stable ids) -----------------------------------------
+
+def _row(i, mid, irt=None, subj="", date=None):
+    return {"id": i, "msgid": mid, "in_reply_to": irt, "subject": subj,
+            "date_iso": date}
+
+
+def test_thread_ids_same_thread_shares_id():
+    rows = [_row(1, "<a>", None, "Disk full", "2024-01-01"),
+            _row(2, "<b>", "<a>", "Re: x", "2024-01-02")]
+    tids = threads.thread_ids(rows)
+    assert tids["<a>"] == tids["<b>"]
+
+
+def test_thread_ids_new_reply_keeps_id():
+    rows = [_row(1, "<a>", None, "Disk full", "2024-01-01"),
+            _row(2, "<b>", "<a>", "Re", "2024-01-02")]
+    prior = threads.thread_ids(rows)
+    rows2 = rows + [_row(3, "<c>", "<b>", "Re", "2024-01-03")]   # new reply
+    tids = threads.thread_ids(rows2, prior=prior)
+    assert tids["<a>"] == prior["<a>"]          # existing id unchanged
+    assert tids["<c>"] == prior["<a>"]          # new msg joins the thread
+
+
+def test_thread_ids_merge_keeps_dominant_existing():
+    # two separate threads first (different subjects, no reply link)
+    rows = [_row(1, "<a>", None, "Alpha topic", "2024-01-01"),
+            _row(2, "<b>", None, "Beta topic", "2024-01-02")]
+    prior = threads.thread_ids(rows)
+    assert prior["<a>"] != prior["<b>"]
+    # a later message replies to <a> AND shares <b>'s subject -> merges them
+    rows2 = rows + [_row(3, "<c>", "<a>", "Beta topic", "2024-01-03")]
+    tids = threads.thread_ids(rows2, prior=prior)
+    assert len({tids["<a>"], tids["<b>"], tids["<c>"]}) == 1   # one thread now
+    assert tids["<a>"] == prior["<a>"]          # kept anchor's existing id
+
+
+def test_thread_ids_fresh_is_deterministic():
+    rows = [_row(1, "<x>", None, "", "2024-01-01")]
+    assert threads.thread_ids(rows)["<x>"] == threads.thread_ids(rows)["<x>"]
+
+
+# --- vaultcache.restore / sync -----------------------------------------------
+
+def _mk(path):
+    c = sqlite3.connect(path)
+    c.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, url TEXT, data TEXT)")
+    return c
+
+
+def test_vaultcache_roundtrip_and_noop(tmp_path):
+    build, vault = str(tmp_path / "b.db"), str(tmp_path / "v.db")
+    c = _mk(build)
+    c.execute("INSERT INTO t (url, data) VALUES ('u1','a'),('u2','b')")
+    c.commit(); c.close()
+
+    assert vaultcache.sync(build, vault, "t", "url") == 2       # build -> vault
+    h = hashlib.md5(open(vault, "rb").read()).hexdigest()
+    assert vaultcache.sync(build, vault, "t", "url") == 0       # no-op
+    assert hashlib.md5(open(vault, "rb").read()).hexdigest() == h  # byte-identical
+
+    build2 = str(tmp_path / "b2.db")
+    _mk(build2).close()
+    assert vaultcache.restore(build2, vault, "t", "url") == 2   # vault -> build
+
+
+def test_render_plain_reattaches_wrapped_quote():
+    # "> lists,..." is a wrap continuation of the deeper "> > ...some" line;
+    # it must NOT render as its own shallower <pre> outside the blockquote.
+    body = ("> > a default file, plus some\n"
+            "> wildcards as well\n"
+            "> > more text\n")
+    out = render_body.render_plain(body)
+    assert "<pre>wildcards as well</pre>" not in out

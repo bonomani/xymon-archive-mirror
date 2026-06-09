@@ -1,0 +1,11 @@
+{
+  "name": "xymon-discussion-public",
+  "private": true,
+  "description": "Dev-only: jsdom for the behavioural UI tests (tests/ui_test.js).",
+  "scripts": {
+    "test:ui": "node tests/ui_test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  }
+}

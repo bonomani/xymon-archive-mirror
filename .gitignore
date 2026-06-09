@@ -1,0 +1,16 @@
+# Generated data + output — rebuilt by crawl.py / generate.py
+archive.db
+# archive.db.gz is NOT versioned in this branch: it has carried leaked PII in
+# past blobs. The obfuscated DB lives on the orphan 'data' branch (force-pushed,
+# single commit) and is pulled at build time. Keep it ignored here.
+archive.db.gz
+site/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+202663_mbox
+*_mbox
+private/
+node_modules/
