@@ -249,6 +249,25 @@ def test_obfuscate_withholds_overdepth_archive(tmp_path, monkeypatch):
     assert c == obfuscate._WITHHELD
 
 
+def test_obfuscate_withholds_archive_bomb_without_oom(tmp_path, monkeypatch):
+    # the expanded-size guard must fire DURING decompression, so a bomb is
+    # withheld without being fully materialised (#3).
+    import gzip as _gz
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    monkeypatch.setattr(obfuscate, "_ARCH_MAX_BYTES", 1000)
+    bomb = _gz.compress(b"A" * 5_000_000)        # 5 MB -> well over the 1000 cap
+    assert len(bomb) < 50_000                     # tiny compressed (bomb-shaped)
+    db = str(tmp_path / "bomb.db")
+    conn = mailstore.connect(db)
+    _att(conn, "bomb.gz", bomb)
+    conn.commit(); conn.close()
+    obfuscate.obfuscate(db)
+    (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
+    assert c == obfuscate._WITHHELD
+    # the bounded gunzip never returns the full 5 MB
+    assert obfuscate._bounded_gunzip(bomb, 1000) is None
+
+
 def test_obfuscate_withholds_over_member_limit(tmp_path, monkeypatch):
     # too many members (archive-bomb guard) -> withhold (#6).
     import io as _io, zipfile as _zip

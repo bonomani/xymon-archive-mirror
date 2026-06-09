@@ -29,7 +29,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # Always take the CODE from main, whichever ref triggered us. A push to the
+      # 'data' branch (new DB) triggers this same workflow -- but that branch only
+      # carries archive.db.gz + this workflow file, not the code.
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

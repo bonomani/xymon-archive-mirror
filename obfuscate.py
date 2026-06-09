@@ -26,6 +26,7 @@ import json
 import os
 import tarfile
 import zipfile
+import zlib
 from collections import Counter
 import re
 import sqlite3
@@ -280,11 +281,33 @@ def _needs_attachment_redaction(ct: str, content: bytes) -> bool:
 _WITHHELD = b"[attachment withheld: contained personal data not safe to publish]"
 
 
-# archive-bomb guards: cap depth, member count and total expanded size. Exceeding
-# any of these makes the container "uninspectable" -> withheld (never published).
+# archive-bomb guards: cap depth, member count, total expanded size, and the
+# per-member compression ratio. Exceeding any makes the container
+# "uninspectable" -> withheld. Sizes are checked BEFORE materialising a member
+# (streaming gunzip, ZipInfo.file_size, TarInfo.size) so a bomb cannot exhaust
+# memory before the guard fires.
 _ARCH_MAX_DEPTH = 4
 _ARCH_MAX_MEMBERS = 5000
 _ARCH_MAX_BYTES = 200 * 1024 * 1024
+_ARCH_MAX_RATIO = 1000
+
+
+def _bounded_gunzip(data: bytes, limit: int):
+    """Gunzip but abort (return None) as soon as output would exceed `limit`, so a
+    gzip bomb can't be fully expanded into memory before the size check."""
+    if limit < 0:
+        return None
+    try:
+        d = zlib.decompressobj(31)                # 16 + MAX_WBITS -> gzip framing
+        out = bytearray(d.decompress(data, limit + 1))
+        while d.unconsumed_tail and len(out) <= limit:
+            out += d.decompress(d.unconsumed_tail, limit + 1 - len(out))
+        if len(out) > limit:
+            return None
+        out += d.flush()
+        return None if len(out) > limit else bytes(out)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _is_container(content: bytes) -> bool:
@@ -308,13 +331,10 @@ def _inspect(content: bytes, depth: int = 0, budget=None):
     if depth > _ARCH_MAX_DEPTH:
         return None
     if content[:2] == b"\x1f\x8b":                       # gzip
-        try:
-            inner = gzip.decompress(content)
-        except Exception:  # noqa: BLE001
+        inner = _bounded_gunzip(content, budget[1])      # capped BEFORE materialise
+        if inner is None:
             return None
         budget[1] -= len(inner)
-        if budget[1] < 0:
-            return None
         return _inspect(inner, depth + 1, budget)
     if content[:4] == b"PK\x03\x04":                     # zip
         try:
@@ -330,6 +350,11 @@ def _inspect(content: bytes, depth: int = 0, budget=None):
                 continue
             budget[0] -= 1
             if budget[0] < 0:
+                return None
+            # check declared sizes BEFORE reading (bomb guard)
+            if zi.file_size > budget[1] or (
+                    zi.compress_size and
+                    zi.file_size / zi.compress_size > _ARCH_MAX_RATIO):
                 return None
             try:
                 data = z.read(zi)                        # by ZipInfo (dup-safe)
@@ -357,6 +382,8 @@ def _inspect(content: bytes, depth: int = 0, budget=None):
                 continue
             budget[0] -= 1
             if budget[0] < 0:
+                return None
+            if mb.size > budget[1]:                       # declared size guard
                 return None
             f = t.extractfile(mb)
             if f is None:
@@ -414,13 +441,10 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
     if depth > _ARCH_MAX_DEPTH:
         return data, False
     if data[:2] == b"\x1f\x8b":                          # gzip (incl. tar.gz)
-        try:
-            inner = gzip.decompress(data)
-        except Exception:  # noqa: BLE001
+        inner = _bounded_gunzip(data, budget[1])         # capped BEFORE materialise
+        if inner is None:
             return data, False
         budget[1] -= len(inner)
-        if budget[1] < 0:
-            return data, False
         red, ok = _clean_archive(inner, blob, depth + 1, budget)
         if not ok:
             return data, False
@@ -445,6 +469,10 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
                     budget[0] -= 1
                     if budget[0] < 0:
                         return data, False
+                    if i.file_size > budget[1] or (
+                            i.compress_size and
+                            i.file_size / i.compress_size > _ARCH_MAX_RATIO):
+                        return data, False               # bomb guard (pre-read)
                     member = src.read(i)                 # by ZipInfo (dup-safe)
                     budget[1] -= len(member)
                     if budget[1] < 0:
@@ -469,6 +497,8 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
                         continue
                     budget[0] -= 1
                     if budget[0] < 0:
+                        return data, False
+                    if mb.size > budget[1]:               # declared size guard
                         return data, False
                     member = src.extractfile(mb).read()
                     budget[1] -= len(member)
