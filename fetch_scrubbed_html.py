@@ -103,7 +103,7 @@ def main(argv=None) -> None:
         cache.commit()
         print(f"backfilled {n} raw_bytes")
 
-    done = cached = 0
+    done = cached = stored = 0
     for mid, url in targets:
         if url in have:                       # served from the vault cache
             bhtml, rhtml = have[url]
@@ -121,16 +121,20 @@ def main(argv=None) -> None:
             data, hdr = httpget(url)
             raw = mailstore.decode_payload(data, hdr.get_content_charset())
             htm = mailstore.sanitize_html(depipermail(raw))
+            if cache is not None:
+                # Cache EVERY fetched URL -- store the rendered HTML, the decoded
+                # source, and the BYTE-EXACT HTTP response. We record it even when
+                # it sanitises to an empty body (a genuinely blank HTML mail):
+                # otherwise the row is absent from the cache and gets re-fetched
+                # from the frozen Pipermail host on every online rebuild.
+                cache.execute(
+                    "INSERT OR IGNORE INTO html "
+                    "(url, body_html, raw_html, raw_bytes) VALUES (?,?,?,?)",
+                    (url, htm, raw, data))
+                stored += 1
             if htm:
                 conn.execute("UPDATE message SET body_html=? WHERE id=?",
                              (htm, mid))
-                if cache is not None:
-                    # store the rendered HTML, the decoded source, and the
-                    # BYTE-EXACT HTTP response, so the original is preserved.
-                    cache.execute(
-                        "INSERT OR IGNORE INTO html "
-                        "(url, body_html, raw_html, raw_bytes) VALUES (?,?,?,?)",
-                        (url, htm, raw, data))
                 done += 1
                 if done % 50 == 0:
                     conn.commit()
@@ -141,9 +145,9 @@ def main(argv=None) -> None:
     conn.commit()
     conn.close()
     if cache is not None:
-        if done:                  # only persist when something new was added,
-            cache.commit()        # so the committed cache file is untouched on
-        cache.close()             # no-op runs (no spurious git commit)
+        if stored:                # persist when anything (incl. empty) was cached,
+            cache.commit()        # so blank mails are recorded and not re-fetched;
+        cache.close()             # a pure no-op run still makes no git churn.
     print(f"recovered {done} HTML body/bodies (+{cached} from cache)")
 
 
