@@ -323,6 +323,31 @@ function foldQuotes(root){
   }
   function shingles(t){ var s=[]; for(var i=0;i+KG<=t.length;i++){
     var g=''; for(var j=0;j<KG;j++) g+=t[i+j].w+' '; s.push(g); } return s; }
+  // A logical line's [start,end) char offsets in body.textContent, split on <br>
+  // and block boundaries. Counts ALL text (including already-folded content) so the
+  // offsets stay aligned with nodeAt()/foldRange(); the line text is kept for the
+  // attribution check. This is the unit contentDedup folds -- a whole line at a
+  // time -- so a text node is never split (no dangling ">-"/"word," fragments).
+  function lineSpans(body){
+    var spans=[], start=0, pos=0, text='';
+    function brk(){ spans.push({start:start, end:pos, text:text}); start=pos; text=''; }
+    (function w(el){ [].forEach.call(el.childNodes,function(n){
+      if(n.nodeType===3){ text+=n.textContent; pos+=n.textContent.length; }
+      else if(n.nodeType===1){
+        if(n.tagName==='BR'){ brk(); }
+        else if(/^(P|DIV|LI|BLOCKQUOTE|TR|PRE|H[1-6]|UL|OL|TABLE|DETAILS)$/.test(n.tagName)){ brk(); w(n); brk(); }
+        else w(n);
+      }
+    }); })(body);
+    brk();
+    return spans;
+  }
+  // Content-dedup, LINE-granular and robust: score each logical line by the
+  // fraction of its words duplicated from EARLIER messages, then fold maximal runs
+  // of quoted lines that form a real BLOCK -- >=2 lines, a trailing (bottom) quote,
+  // or a run led by an attribution ("X wrote:"). A lone duplicated line wedged
+  // between the author's own lines is inline context (a quote being replied to) and
+  // is left visible. Folds whole lines only, so a text node is never split.
   function contentDedup(root){
     var bodies=root.querySelectorAll('.tmsg .pt,.tmsg .md');
     if(!bodies.length) bodies=root.querySelectorAll('.pt,.md');
@@ -330,22 +355,37 @@ function foldQuotes(root){
     [].forEach.call(bodies, function(body){
       var full=body.textContent||'', t=toks(full);
       if(t.length>=KG){
-        var cov=new Array(t.length), i, j;
-        for(i=0;i+KG<=t.length;i++){ var g=''; for(j=0;j<KG;j++) g+=t[i+j].w+' ';
+        var cov=new Array(t.length), i, j, g;
+        for(i=0;i+KG<=t.length;i++){ g=''; for(j=0;j<KG;j++) g+=t[i+j].w+' ';
           if(prior[g]) for(j=0;j<KG;j++) cov[i+j]=true; }
-        var runs=[]; i=0;
-        while(i<t.length){
-          if(!cov[i]){ i++; continue; }
-          var s=i, last=i, gap=0;                 // bridge small gaps (edited words)
-          while(i<t.length){ if(cov[i]){ last=i; gap=0; i++; }
-            else { if(++gap>KG) break; i++; } }
-          if(last-s+1>=12) runs.push([s,last]);    // >=12 duplicated words
+        var spans=lineSpans(body), nL=spans.length, nw=[], nc=[];
+        for(i=0;i<nL;i++){ nw[i]=0; nc[i]=0; }
+        var li=0;                                   // map each word to its line
+        for(i=0;i<t.length;i++){ while(li<nL-1 && t[i].off>=spans[li].end) li++;
+          nw[li]++; if(cov[i]) nc[li]++; }
+        var quoted=[];                              // line is MOSTLY duplicated
+        for(i=0;i<nL;i++) quoted[i]= nw[i]>=4 && nc[i]/nw[i]>=0.8;
+        var runs=[]; i=0;                           // maximal runs of quoted lines
+        while(i<nL){
+          if(!quoted[i]){ i++; continue; }
+          var s=i, e=i; j=i+1;
+          while(j<nL){ if(quoted[j]){ e=j; j++; }
+            else if(nw[j]===0){ j++; }              // blank line -> bridge the run
+            else break; }
+          runs.push([s,e]); i=j;
         }
-        // fold exactly the duplicated words (no line-snap: HTML/flowed bodies have
-        // no newlines in textContent, so snapping to a line would grab the whole
-        // message and fold the author's own reply).
-        for(var r=runs.length-1;r>=0;r--)
-          foldRange(body, t[runs[r][0]].off, t[runs[r][1]].end);
+        for(var r=runs.length-1;r>=0;r--){
+          var a=runs[r][0], b=runs[r][1], tot=0, k;
+          for(k=a;k<=b;k++) tot+=nc[k];
+          if(tot<12) continue;                      // too little duplication to fold
+          var multi=b>a, trailing=true;             // a bottom quote reaches the end
+          for(k=b+1;k<nL;k++){ if(nw[k]>0 && !quoted[k]){ trailing=false; break; } }
+          var attr=false;                           // run led by an "X wrote:" line
+          for(k=a-1;k>=0;k--){ if(nw[k]===0) continue;
+            attr=ATTR.test(spans[k].text) && /:\\s*$/.test(spans[k].text); break; }
+          if(multi||trailing||attr)
+            foldRange(body, spans[a].start, spans[b].end);  // fold whole lines
+        }
       }
       shingles(t).forEach(function(g){ prior[g]=1; });
     });

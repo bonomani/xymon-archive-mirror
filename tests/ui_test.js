@@ -71,6 +71,32 @@ console.log('1b) attribution colon is not split into the quote fold (NBSP glue)'
   assert(det && foldTxt.indexOf('Just') === 0, 'fold body starts at the quoted word, not the colon');
 }
 
+console.log('1c) contentDedup keeps an isolated inline re-quote visible (not folded)');
+{
+  // contentDedup is line-granular: a single duplicated line wedged between the
+  // author's OWN lines is inline context (a quote they're replying to), so it must
+  // stay visible and whole -- not folded as a fragment. Multi-line / bottom quotes
+  // still fold (verified across the corpus in the section-2 scan below).
+  const dup = 'documentation is still fragmented between sourceforge mailing lists ' +
+    'distro patches wiki pages and github discussions';
+  const prior = '<div class="tmsg"><div class="md"><p>' + dup +
+    '</p><p>plus a separate original sentence here for padding.</p></div></div>';
+  const reply = '<div class="tmsg"><div class="md"><div>On the initial post...<br>' +
+    '<div>&gt;- ' + dup + ',</div><br><div>Is there anything new worth adding now.' +
+    '</div></div></div></div>';
+  const d = new JSDOM('<!doctype html><body data-root="./">' + prior + reply + '</body>',
+    { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const msg = document.querySelectorAll('.tmsg .md')[1];
+  let node = null;
+  (function w(n) { [].forEach.call(n.childNodes, c => {
+    if (c.nodeType === 3 && c.textContent.includes('still fragmented')) node = c;
+    else if (c.nodeType === 1) w(c); }); })(msg);
+  assert(node && !(node.parentElement && node.parentElement.closest('details.q')),
+    'isolated inline re-quote stays visible (not folded into a fragment)');
+}
+
 const idx = JSON.parse(fs.readFileSync(path.join(SITE, 'search-index.json'), 'utf8'));
 const findMsg = (name, date) =>
   idx.find(r => (r[2] || '').includes(name) && (r[3] || '').startsWith(date));
