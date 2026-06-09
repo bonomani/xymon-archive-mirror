@@ -118,6 +118,13 @@ _OBF = re.compile(
     re.I)
 _OBF_B = re.compile(_OBF.pattern.encode(), re.I)
 _OBF_HASDOT = re.compile(r"\bdot\b|[\(\[\{]\s*dot", re.I)   # word/bracket "dot"
+# percent-encoded "@" (%40). Unlike the word/bracket forms this needs NO boundary
+# guard -- %40 is never prose, and these often sit inside percent-encoded URLs
+# (e.g. Outlook SafeLinks "...%7Ctschmidt%40micron.com%7C..."), so a lookbehind
+# would wrongly skip them. Whatever the captured local, masking removes the
+# recoverable address.
+_PCT = re.compile(r"[A-Za-z0-9._+\-]+%40[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", re.I)
+_PCT_B = re.compile(_PCT.pattern.encode(), re.I)
 
 
 def _obf_canon(s: str) -> str:
@@ -212,6 +219,19 @@ def make_repl(salt: bytes):
             return False
         return True                                # mask
 
+    def pct_repl(m):                               # local%40domain (incl. in URLs)
+        canon = re.sub("%40", "@", m.group(0), flags=re.I).lower()
+        if canon in LIST_ALLOWLIST or _PSEUDO_AT.match(canon):
+            return m.group(0)
+        return _pseudo(canon, salt)
+
+    def pct_repl_b(m):
+        canon = re.sub(b"%40", b"@", m.group(0), flags=re.I).decode(
+            "ascii", "replace").lower()
+        if canon in LIST_ALLOWLIST or _PSEUDO_AT.match(canon):
+            return m.group(0)
+        return _pseudo(canon, salt).encode()
+
     def obf_repl(m):                               # (at)/[at]/%40/"dot" forms
         canon = _obf_canon(m.group(0))
         if _obf_mask(canon, m.group(2) is not None, m.group(3)):
@@ -229,7 +249,8 @@ def make_repl(salt: bytes):
         if not s:
             return s
         s = _GLUE.sub(" ", s)                      # un-glue a run-together URL
-        s = _OBF.sub(obf_repl, s)                  # (at)/[at]/%40/dot -> pseudonym
+        s = _PCT.sub(pct_repl, s)                  # %40 (incl. inside URLs)
+        s = _OBF.sub(obf_repl, s)                  # (at)/[at]/dot -> pseudonym
         return _AT.sub(at_t, _AT_BR.sub(at_br, _T.sub(repl_t, s)))
 
     def name(s):                                   # from_name: also whole plain at-addr
@@ -241,6 +262,7 @@ def make_repl(salt: bytes):
         if not b:
             return b
         b = _GLUE_B.sub(b" ", b)                   # un-glue a run-together URL
+        b = _PCT_B.sub(pct_repl_b, b)
         b = _OBF_B.sub(obf_repl_b, b)
         return _AT_B.sub(at_b, _AT_BR_B.sub(at_br_b, _B.sub(repl_b, b)))
 

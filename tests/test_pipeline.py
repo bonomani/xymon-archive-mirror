@@ -94,6 +94,7 @@ def test_text_masks_obfuscated_address_forms():
         ("0500a8c0 (at) noip.org", "noip.org"),               # (at)
         ("user [at] example.org", "example.org"),             # [at]
         ("bgmilne%40staff.telkomsa.net", "telkomsa"),         # %40
+        ("safelink%7C01%7Ctschmidt%40micron.com%7C40", "micron.com"),  # %40 in URL
         ("foo (at)\n      mail.gmail.com", "mail.gmail.com"),  # wrapped (at)
         ("erdmann at daimler dot com", "daimler"),            # word dot
         ("parker AT uregina DOT ca", "uregina"),              # caps
