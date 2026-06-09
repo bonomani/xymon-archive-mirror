@@ -49,6 +49,28 @@ console.log('1) features present in script.js');
  'function loadThread', 'function hlTerms', 'function mergeAdjacent']
   .forEach(f => assert(script.includes(f), 'script.js defines ' + f));
 
+console.log('1b) attribution colon is not split into the quote fold (NBSP glue)');
+{
+  // adjacent block elements give no separating space in textContent, so a French
+  // attribution "a ecrit :" glues to the quoted word as one token ":Just".
+  // contentDedup must fold from the WORD, leaving the colon on the attribution.
+  const body = 'Just testing the email list here now.\n\nMore updates to share with you.';
+  const d = new JSDOM('<!doctype html><body data-root="./">' +
+    '<div class="tmsg"><div class="pt"><pre>' + body + '</pre></div></div>' +
+    '<div class="tmsg"><div class="pt"><pre>Reply.\n\n' +
+    'Le 1/1/2026, X a écrit :</pre><blockquote><pre>' + body +
+    '</pre></blockquote></div></div></body>', { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const msg = document.querySelectorAll('.tmsg .pt')[1];
+  const det = msg.querySelector('details.q');
+  assert(det, 'reply quote is folded');
+  const foldTxt = det ? det.textContent.replace(String.fromCharCode(0x25B8), '').trim() : '';
+  const outer = det ? (msg.textContent || '').replace(det.textContent || '', '') : '';
+  assert(outer.trim().slice(-1) === ':', 'attribution keeps its trailing colon (above the toggle)');
+  assert(det && foldTxt.indexOf('Just') === 0, 'fold body starts at the quoted word, not the colon');
+}
+
 const idx = JSON.parse(fs.readFileSync(path.join(SITE, 'search-index.json'), 'utf8'));
 const findMsg = (name, date) =>
   idx.find(r => (r[2] || '').includes(name) && (r[3] || '').startsWith(date));

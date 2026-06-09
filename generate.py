@@ -309,8 +309,16 @@ function foldQuotes(root){
   // Folds inline quotes too (#1); runs back-to-front so offsets stay valid.
   function toks(text){   // normalized words with their raw text offsets
     var re=/\\S+/g, m, o=[];
-    while((m=re.exec(text))){ var w=m[0].toLowerCase().replace(/[^a-z0-9]+/g,'');
-      if(w) o.push({w:w, off:m.index, end:m.index+m[0].length}); }
+    while((m=re.exec(text))){ var raw=m[0], w=raw.toLowerCase().replace(/[^a-z0-9]+/g,'');
+      if(!w) continue;
+      // Trim leading/trailing punctuation from the OFFSETS, not just from the
+      // normalized word: adjacent block elements yield no separating space in
+      // textContent, so an attribution "ecrit :" can glue to the quote start as a
+      // single token ":Just". Folding from the raw start would split the ":" into
+      // the quote fold (it ends up on its own line under the toggle). Fold the WORD.
+      var lead=raw.search(/[a-z0-9]/i); if(lead<0) lead=0;
+      var trail=raw.length-1; while(trail>lead && !/[a-z0-9]/i.test(raw[trail])) trail--;
+      o.push({w:w, off:m.index+lead, end:m.index+trail+1}); }
     return o;
   }
   function shingles(t){ var s=[]; for(var i=0;i+KG<=t.length;i++){
