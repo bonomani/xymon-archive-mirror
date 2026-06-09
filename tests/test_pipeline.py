@@ -621,6 +621,29 @@ def test_dbhash_order_independent():
     assert a == b
 
 
+def test_dbhash_covers_raw():
+    # `raw` is published (archive.db.gz + the downloadable mbox) and obfuscate
+    # rewrites it, so a change to raw alone MUST move the fingerprint -- otherwise
+    # a privacy scrub that only touches raw never triggers a republish.
+    import os
+    import tempfile
+
+    def h(raw_value):
+        p = os.path.join(tempfile.mkdtemp(), "r.db")
+        con = sqlite3.connect(p)
+        con.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, month, msgid, "
+                    "in_reply_to, subject, from_name, from_email, date_iso, body, "
+                    "source, body_html, raw)")
+        con.execute("INSERT INTO message (month, msgid, body, raw) "
+                    "VALUES ('m','<1>','b',?)", (raw_value,))
+        con.commit()
+        con.close()
+        return dbhash.fingerprint(p)
+
+    assert "raw" in dbhash.COLS
+    assert h(b"leak: real@acme.com") != h(b"leak: user-x@xymon.invalid")
+
+
 def test_dbhash_no_xor_cancellation():
     # Two byte-identical rows must NOT cancel. NULL msgids are allowed to repeat
     # (no UNIQUE covers them), so a duplicated pair is reachable; under the old

@@ -27,7 +27,14 @@ _MOD = 1 << 256
 
 COLS = ("month", "msgid", "in_reply_to", "subject", "from_name",
         "from_email", "date_iso", "body", "source", "body_html", "thread_id",
-        "archive_source", "source_file")   # provenance: corrections must republish
+        "archive_source", "source_file",   # provenance: corrections must republish
+        # `raw` IS published -- it ships in archive.db.gz and generate.py builds
+        # the downloadable per-month mbox from it -- and obfuscate.py rewrites it
+        # (address pseudonymisation, incl. addresses decoded out of base64 / QP
+        # MIME parts). It MUST be fingerprinted: when it was omitted, a privacy
+        # scrub that only touched `raw` left the fingerprint unchanged, so pack-db
+        # saw "no change" and never republished -- the corrected DB never shipped.
+        "raw")
 
 
 def _row_digest(values) -> int:
