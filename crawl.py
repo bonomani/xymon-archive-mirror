@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import argparse
 import email
-import gzip
 import re
 import sqlite3
 import time
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Iterator
 
@@ -21,6 +21,8 @@ import mailstore
 BASE = "https://lists.xymon.com/"
 LIST = "xymon"
 UA = "xymon-discussion-public/1.0 (+stdlib crawler)"
+_MAX_FETCH = 100 * 1024 * 1024     # cap a single download (compressed)
+_MAX_GUNZIP = 500 * 1024 * 1024    # cap the decompressed mbox (gzip-bomb guard)
 
 # An mbox "From " envelope line ends with an asctime "HH:MM:SS YYYY", and a
 # real separator sits at the start of the file or after a blank line (the
@@ -35,7 +37,26 @@ _FROM = re.compile(
 def fetch(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+        data = resp.read(_MAX_FETCH + 1)
+    if len(data) > _MAX_FETCH:
+        raise ValueError(f"response exceeds {_MAX_FETCH} bytes: {url}")
+    return data
+
+
+def _gunzip_bounded(data: bytes, limit: int = _MAX_GUNZIP) -> bytes:
+    """Decompress a gzip stream, aborting once output would exceed `limit` -- a
+    crafted (or corrupted) .txt.gz can't expand to gigabytes and OOM the runner
+    before a size check fires (the SSRF/cap hardening parity for the crawler)."""
+    d = zlib.decompressobj(31)                 # 16 + MAX_WBITS -> gzip framing
+    out = bytearray(d.decompress(data, limit + 1))
+    while d.unconsumed_tail and len(out) <= limit:
+        out += d.decompress(d.unconsumed_tail, limit + 1 - len(out))
+    if len(out) > limit:
+        raise ValueError(f"gzip expands beyond {limit} bytes")
+    out += d.flush()
+    if len(out) > limit:
+        raise ValueError(f"gzip expands beyond {limit} bytes")
+    return bytes(out)
 
 
 def list_months() -> list[str]:
@@ -69,7 +90,7 @@ def _iter_mbox(raw: bytes) -> Iterator[tuple[bytes, email.message.Message]]:
 
 def parse_month(month: str) -> Iterator[dict]:
     """Download and parse one month's mbox into message dicts."""
-    raw = gzip.decompress(fetch(f"{BASE}{LIST}/{month}.txt.gz"))
+    raw = _gunzip_bounded(fetch(f"{BASE}{LIST}/{month}.txt.gz"))
     for chunk, msg in _iter_mbox(raw):
         row = mailstore.message_to_row(msg, month=month, raw=chunk)
         row["raw"] = chunk

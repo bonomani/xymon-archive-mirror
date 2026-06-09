@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read          # read-only: the DB is no longer committed back here
   pages: write
   id-token: write
 

@@ -16,6 +16,7 @@ import generate
 import render_body
 import vaultcache
 import threads
+import dbhash
 
 SALT = b"unit-test-salt"
 
@@ -592,3 +593,62 @@ def test_scrubbed_html_resanitizes_from_cache(tmp_path):
     conn.close()
     assert got and "STALE-CACHED" not in got and "<script" not in got.lower()
     assert "hi" in got
+
+
+# --- dbhash: the republication fingerprint ------------------------------------
+
+def _hash_rows(rows):
+    """rows: (month, msgid, subject, body, source) -> dbhash.fingerprint."""
+    import os
+    import tempfile
+    p = os.path.join(tempfile.mkdtemp(), "h.db")
+    con = sqlite3.connect(p)
+    con.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, month, msgid, "
+                "in_reply_to, subject, from_name, from_email, date_iso, body, "
+                "source, body_html)")
+    con.executemany("INSERT INTO message (month, msgid, subject, body, source) "
+                    "VALUES (?,?,?,?,?)", rows)
+    con.commit()
+    con.close()
+    return dbhash.fingerprint(p)
+
+
+def test_dbhash_order_independent():
+    a = _hash_rows([("m", "<1>", "s1", "b1", "list"),
+                    ("m", "<2>", "s2", "b2", "list")])
+    b = _hash_rows([("m", "<2>", "s2", "b2", "list"),
+                    ("m", "<1>", "s1", "b1", "list")])
+    assert a == b
+
+
+def test_dbhash_no_xor_cancellation():
+    # Two byte-identical rows must NOT cancel. NULL msgids are allowed to repeat
+    # (no UNIQUE covers them), so a duplicated pair is reachable; under the old
+    # XOR accumulator the pair cancels to zero and collides with `base`.
+    base = [("m", "<1>", "s1", "b1", "list")]
+    dup = base + [("m", None, "d", "x", "list"), ("m", None, "d", "x", "list")]
+    assert _hash_rows(base) != _hash_rows(dup)
+
+
+def test_dbhash_none_distinct_from_string_none():
+    assert _hash_rows([("m", None, "s", "b", "list")]) != \
+        _hash_rows([("m", "None", "s", "b", "list")])
+
+
+def test_dbhash_detects_content_change():
+    assert _hash_rows([("m", "<1>", "s", "body one", "list")]) != \
+        _hash_rows([("m", "<1>", "s", "body two", "list")])
+
+
+# --- gh_discussion_rows: GitHub bodyHTML is sanitized at ingest ---------------
+
+def test_gh_discussion_sanitizes_bodyhtml():
+    disc = {
+        "id": "D1", "title": "T", "createdAt": "2024-01-02T03:04:05Z",
+        "author": {"login": "alice"}, "body": "x",
+        "bodyHTML": "<p>hi</p><script>alert(1)</script>",
+        "comments": {"nodes": []},
+    }
+    bh = mailstore.gh_discussion_rows(disc)[0]["body_html"]
+    assert "<script" not in bh.lower() and "alert(1)" not in bh
+    assert "hi" in bh

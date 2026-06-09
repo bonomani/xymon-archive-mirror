@@ -5,8 +5,15 @@
 rowids and reshuffles the physical SQLite layout -- so the *file* bytes
 change even when no message did. Committing on file bytes would therefore
 produce a 26 MB commit every CI run. This hashes message *content* only
-(order-independent XOR of per-row hashes), so CI commits the DB only when
-messages truly change.
+(order-independent), so CI commits the DB only when messages truly change.
+
+The accumulator is a SUM (mod 2**256), not an XOR: XOR cancels any pair of
+byte-identical contributions to zero, so two rows that hash the same -- e.g.
+two NULL-msgid rows with identical content, which no UNIQUE constraint
+forbids -- would vanish from the fingerprint and a real content change could
+fail to republish. Addition is equally order-independent but does not cancel.
+Each row's fields are length-prefixed and type-tagged before hashing so a
+value cannot drift across a field boundary (the old repr() form could).
 
     python3 dbhash.py [archive.db]
 """
@@ -16,9 +23,29 @@ import hashlib
 import sqlite3
 import sys
 
+_MOD = 1 << 256
+
 COLS = ("month", "msgid", "in_reply_to", "subject", "from_name",
         "from_email", "date_iso", "body", "source", "body_html", "thread_id",
         "archive_source", "source_file")   # provenance: corrections must republish
+
+
+def _row_digest(values) -> int:
+    """Order-unambiguous SHA-256 of a row's fields. Each field is tagged by type
+    (None / bytes / scalar) and length-prefixed, so ('a','bc') and ('ab','c')
+    -- equal under repr() concatenation -- hash differently, and None is distinct
+    from the string 'None'."""
+    h = hashlib.sha256()
+    for v in values:
+        if v is None:
+            h.update(b"N\x00")
+        elif isinstance(v, (bytes, bytearray)):
+            b = bytes(v)
+            h.update(b"B" + len(b).to_bytes(8, "big") + b)
+        else:
+            b = str(v).encode("utf-8", "surrogatepass")
+            h.update(b"S" + len(b).to_bytes(8, "big") + b)
+    return int.from_bytes(h.digest(), "big")
 
 
 def fingerprint(db: str) -> str:
@@ -27,8 +54,7 @@ def fingerprint(db: str) -> str:
     have = {r[1] for r in con.execute("PRAGMA table_info(message)")}
     cols = [c for c in COLS if c in have]   # tolerate a DB predating a column
     for row in con.execute(f"SELECT {', '.join(cols)} FROM message"):
-        digest = hashlib.sha256(repr(row).encode("utf-8", "replace")).digest()
-        acc ^= int.from_bytes(digest, "big")
+        acc = (acc + _row_digest(row)) % _MOD
     # fold in attachments by url + filename + content_type + sha256(content):
     # url+size alone collide when a same-length payload changes (e.g. an
     # attachment is re-sanitised), so a real content change would not republish.
@@ -36,10 +62,8 @@ def fingerprint(db: str) -> str:
                    "WHERE type='table' AND name='attachment'").fetchone():
         for url, fn, ct, content in con.execute(
                 "SELECT url, filename, content_type, content FROM attachment"):
-            ch = hashlib.sha256(content).hexdigest() if content is not None else ""
-            digest = hashlib.sha256(
-                repr((url, fn, ct, ch)).encode("utf-8", "replace")).digest()
-            acc ^= int.from_bytes(digest, "big")
+            ch = hashlib.sha256(content).hexdigest() if content is not None else None
+            acc = (acc + _row_digest((url, fn, ct, ch))) % _MOD
     con.close()
     return f"{acc:064x}"
 

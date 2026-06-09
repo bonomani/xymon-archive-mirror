@@ -440,7 +440,11 @@ def gh_discussion_rows(disc: dict) -> list[dict]:
             "date_raw": created,
             "body": node.get("body") or "",
             "source": "github",
-            "body_html": node.get("bodyHTML"),
+            # GitHub server-renders bodyHTML, but run it through the same allowlist
+            # sanitizer as e-mail HTML rather than trust a third party's markup
+            # verbatim: body_to_html re-serves stored body_html without re-checking
+            # it, so every source must sanitize at ingest (parity + defense-in-depth).
+            "body_html": sanitize_html(node.get("bodyHTML") or "") or None,
             "raw": None,
         }
 
