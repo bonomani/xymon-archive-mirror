@@ -19,4 +19,9 @@ Every removed line is boilerplate, in one of three categories:
 Preserved verbatim: prose, code/config/commands, quoted replies (kept, muted),
 and all links (linkified). Email addresses are pseudonymised by design.
 
+The comparison uses the privacy-safe published representation. Byte-exact raw
+mbox files, original attachments, and byte-exact HTTP response bodies for
+recovered HTML-only messages are retained separately in the private source
+vault; they are not published.
+
 Reproduce: `python3 /tmp/compare2.py` (see git history of this analysis).

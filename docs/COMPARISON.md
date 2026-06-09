@@ -1,6 +1,6 @@
 # Deep comparison: mirror vs source Pipermail
 
-**Mirror:** https://bonomani.github.io/xymon-discussion-public/
+**Mirror:** https://xymon-monitoring.github.io/xymon-discussion-public/
 **Source:** https://lists.xymon.com/xymon/
 
 Compared oldest → newest. Because the two render every message uniformly, the
@@ -17,14 +17,13 @@ messages. The source has **no** content after mid-2024 (those months 404), so
 | | Source (lists.xymon.com) | Mirror |
 |---|---|---|
 | Date range with content | 2005-04 → 2024-07 | **2005 → 2026-06** |
-| Months served | 233 (7 more are dead links → 404) | **251** (233 Pipermail + 18 inbox) |
-| Messages | ~48k | **48,427** |
+| Months served | 233 (7 more are dead links → 404) | **251** (Pipermail + HyperKitty) |
+| Messages | ~48k | **48,501** |
 | 2024-08 → 2026 | **absent (404)** | present (recovered from list mail) |
 
 The mirror is **strictly more complete**: it reproduces everything the source
-serves *and* fills the ~2-year gap after Pipermail stopped (imported from the
-list mail, the only surviving copy), and it omits the source's 7 dead-link
-months.
+serves *and* fills the post-Pipermail period from the authenticated HyperKitty
+archive, while the upstream index still contains seven dead-link months.
 
 Per-month counts match within ~1% (11/20 sampled months identical; the rest
 differ by 1–9 because Pipermail's `date.html` dedups/bins boundary messages
@@ -95,7 +94,7 @@ reply; the substantive text still matches. Across the sample: **36/40 messages
 | **mbox download** | per-month `.txt.gz` (raw) | per-month `.txt.gz` (deduped, obfuscated) | tie |
 | **UI / mobile** | 2005-era HTML | responsive CSS, badges, muted quotes, links | **Mirror** |
 | **Authority / canonical** | the official origin | a mirror | **Source** |
-| **Byte-exact original** | yes | no (obfuscated/cleaned) | **Source** |
+| **Byte-exact original** | yes | public copy is obfuscated/cleaned; private vault retains originals | **Source/private vault** |
 
 ---
 
@@ -116,6 +115,11 @@ reply; the substantive text still matches. Across the sample: **36/40 messages
   preserves the byte-exact originals (including the real addresses) — which is
   exactly why it should stay private/canonical while the mirror is the clean,
   privacy-safe public face.
+
+The private mirror vault also retains the raw monthly mboxes, original
+attachment blobs, and byte-exact HTTP response bodies used to recover
+HTML-only messages. Provider and source-file provenance are recorded per
+published message.
 
 **Bottom line:** for *consuming* the archive, the mirror is better on every
 practical axis (coverage, privacy, readability, search, navigation). The source

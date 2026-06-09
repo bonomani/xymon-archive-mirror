@@ -4,7 +4,9 @@ name: Build & deploy archive
 # ./build.sh, which has no GitHub dependency. The obfuscated DB is NOT kept in
 # this branch's history (it would accumulate blobs that have leaked PII before);
 # it lives on the orphan 'data' branch, force-pushed by the private publisher.
-# This job pulls archive.db.gz from 'data', renders, and deploys.
+# That branch also carries this workflow file so its push can start Actions;
+# the job explicitly checks out canonical code from main, pulls archive.db.gz
+# from data, renders, and deploys.
 
 on:
   push:
