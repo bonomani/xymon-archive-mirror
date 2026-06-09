@@ -150,6 +150,47 @@ def test_obfuscate_withholds_binary_archive(tmp_path, monkeypatch):
     assert content == obfuscate._WITHHELD
 
 
+def test_fetch_scrubbed_html_stores_raw_bytes(tmp_path, monkeypatch):
+    # the cache must keep the BYTE-EXACT response, not just decoded text (#5).
+    import fetch_scrubbed_html as fsh
+    RAW = b"<tt>&lt;p&gt;h\xe9llo&lt;/p&gt;</tt>\n"   # non-utf8 byte on purpose
+
+    class _H:
+        def get_content_charset(self):
+            return None
+    monkeypatch.setattr(fsh, "httpget", lambda u: (RAW, _H()))
+    db = str(tmp_path / "a.db")
+    conn = mailstore.connect(db)
+    conn.execute(
+        "INSERT INTO message (month, msgid, body) VALUES (?,?,?)",
+        ("2024-01", "<1@h>",
+         "URL: <https://x/y/attachment.html>\n----- next part -----\n"))
+    conn.commit(); conn.close()
+    cache = str(tmp_path / "cache.db")
+    fsh.main(["--db", db, "--cache", cache, "--delay", "0"])
+    rb = sqlite3.connect(cache).execute("SELECT raw_bytes FROM html").fetchone()
+    assert rb is not None and bytes(rb[0]) == RAW
+
+
+def test_fetch_scrubbed_html_backfills_raw_bytes(tmp_path, monkeypatch):
+    # cached rows that pre-date raw_bytes are skipped by the normal loop; the
+    # --backfill-raw path must fill them (#5).
+    import fetch_scrubbed_html as fsh
+    RAW = b"\x89raw-bytes\x00"
+    monkeypatch.setattr(fsh, "httpget", lambda u: (RAW, None))
+    cache = str(tmp_path / "cache.db")
+    cc = sqlite3.connect(cache)
+    cc.execute("CREATE TABLE html (url TEXT PRIMARY KEY, body_html TEXT, "
+               "raw_html TEXT, raw_bytes BLOB)")
+    cc.execute("INSERT INTO html (url, body_html) VALUES ('https://x/a.html','<p>x</p>')")
+    cc.commit(); cc.close()
+    db = str(tmp_path / "a.db")
+    mailstore.connect(db).close()
+    fsh.main(["--db", db, "--cache", cache, "--backfill-raw", "--delay", "0"])
+    rb = sqlite3.connect(cache).execute("SELECT raw_bytes FROM html").fetchone()
+    assert rb is not None and bytes(rb[0]) == RAW
+
+
 def _att(conn, fn, content, ct="application/octet-stream"):
     conn.execute(
         "INSERT INTO attachment (msgid, month, url, filename, content_type, "

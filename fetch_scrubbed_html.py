@@ -51,6 +51,9 @@ def main(argv=None) -> None:
                     help="persistent url->html cache (skip re-fetch); '' to disable")
     ap.add_argument("--no-network", action="store_true",
                     help="restore from the cache only; never fetch (offline rebuild)")
+    ap.add_argument("--backfill-raw", action="store_true",
+                    help="re-fetch cached rows that lack the byte-exact raw "
+                         "response and store it (one-off; needs network)")
     args = ap.parse_args(argv)
 
     conn = mailstore.connect(args.db)
@@ -72,11 +75,32 @@ def main(argv=None) -> None:
     if str(args.cache) and Path(args.cache).parent.exists():
         cache = sqlite3.connect(args.cache)
         cache.execute("CREATE TABLE IF NOT EXISTS html "
-                      "(url TEXT PRIMARY KEY, body_html TEXT, raw_html TEXT)")
-        if "raw_html" not in {r[1] for r in cache.execute(
-                "PRAGMA table_info(html)")}:        # preserve the un-sanitised
-            cache.execute("ALTER TABLE html ADD COLUMN raw_html TEXT")  # source
+                      "(url TEXT PRIMARY KEY, body_html TEXT, raw_html TEXT, "
+                      "raw_bytes BLOB)")
+        cols = {r[1] for r in cache.execute("PRAGMA table_info(html)")}
+        if "raw_html" not in cols:                  # decoded source (legacy)
+            cache.execute("ALTER TABLE html ADD COLUMN raw_html TEXT")
+        if "raw_bytes" not in cols:                 # byte-exact HTTP response
+            cache.execute("ALTER TABLE html ADD COLUMN raw_bytes BLOB")
         have = dict(cache.execute("SELECT url, body_html FROM html"))
+
+    # one-off backfill: cached rows pre-date raw_bytes and the normal loop skips
+    # cached urls, so they would never get it. Re-fetch just the byte-exact body.
+    if cache is not None and args.backfill_raw and not args.no_network:
+        miss = [u for (u,) in cache.execute(
+            "SELECT url FROM html WHERE raw_bytes IS NULL")]
+        print(f"backfilling raw_bytes for {len(miss)} cached row(s)")
+        n = 0
+        for u in miss:
+            try:
+                data, _ = httpget(u)
+                cache.execute("UPDATE html SET raw_bytes=? WHERE url=?", (data, u))
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                print(f"  ! {u}: {exc}")
+            time.sleep(args.delay)
+        cache.commit()
+        print(f"backfilled {n} raw_bytes")
 
     done = cached = 0
     for mid, url in targets:
@@ -95,11 +119,12 @@ def main(argv=None) -> None:
                 conn.execute("UPDATE message SET body_html=? WHERE id=?",
                              (htm, mid))
                 if cache is not None:
-                    # store BOTH the rendered HTML and the raw source response,
-                    # so the original is preserved (not just the derived form).
-                    cache.execute("INSERT OR IGNORE INTO html "
-                                  "(url, body_html, raw_html) VALUES (?, ?, ?)",
-                                  (url, htm, raw))
+                    # store the rendered HTML, the decoded source, and the
+                    # BYTE-EXACT HTTP response, so the original is preserved.
+                    cache.execute(
+                        "INSERT OR IGNORE INTO html "
+                        "(url, body_html, raw_html, raw_bytes) VALUES (?,?,?,?)",
+                        (url, htm, raw, data))
                 done += 1
                 if done % 50 == 0:
                     conn.commit()
