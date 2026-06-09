@@ -19,11 +19,14 @@ default (with a warning) so it never fails open and leaks cleartext.
 """
 from __future__ import annotations
 
+import base64
+import email
 import gzip
 import hashlib
 import io
 import json
 import os
+import quopri
 import tarfile
 import zipfile
 import zlib
@@ -598,6 +601,92 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
     return data, False                     # binary carrying an address -> withhold
 
 
+# A base64- or quoted-printable-encoded MIME part hides addresses from the
+# byte-level scanners in blob(): base64 has no '@'/' at '/%40 in its alphabet, and
+# a QP soft line-break (=\n) can split an address across two lines so the regex
+# never matches it. The published `raw` column (and the downloadable per-month
+# mbox built from it) therefore leaked real addresses buried in base64 message
+# bodies and S/MIME signatures. We walk the MIME tree, decode each transfer-
+# encoded leaf, scrub it with the SAME blob()+redact_contact / _clean_archive used
+# everywhere else, and splice the re-encoded bytes back IN PLACE.
+_TENC_WITHHELD = b"[encoded part withheld: contained personal data not safe to publish]"
+
+
+def _reencode_part(decoded: bytes, cte: str, sample: bytes) -> bytes:
+    """Re-encode `decoded` in its original transfer encoding, matching the sample
+    region's trailing-newline and CRLF/LF convention so the splice stays a clean
+    drop-in. Only ever called for a part that actually changed."""
+    out = base64.encodebytes(decoded) if cte == "base64" \
+        else quopri.encodestring(decoded)
+    if not sample.endswith(b"\n") and out.endswith(b"\n"):
+        out = out[:-1]
+    if b"\r\n" in sample and b"\r\n" not in out:
+        out = out.replace(b"\n", b"\r\n")
+    return out
+
+
+def _scrub_transfer_encoded(raw, blob):
+    """Mask addresses hidden inside base64 / quoted-printable MIME parts of a raw
+    message. Surgical and deterministic: only the encoded-body regions that
+    actually changed are rewritten, so a message with nothing to mask is returned
+    BYTE-IDENTICAL (no spurious republish). A container part (gz/zip/tar) is run
+    through _clean_archive (sanitise-or-withhold) like an attachment; everything
+    else is flat-scrubbed. Best-effort by design: a part that cannot be located
+    for splicing is left for the independent privacy gate to catch -- fail closed,
+    never fail open."""
+    if not raw or not isinstance(raw, (bytes, bytearray)) \
+            or b"Content-Transfer-Encoding" not in raw:
+        return raw
+    raw = bytes(raw)
+    try:
+        msg = email.message_from_bytes(raw)
+    except Exception:  # noqa: BLE001  unparseable -> leave to blob()/the gate
+        return raw
+    cursor, edits = 0, []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        cte = (part.get("Content-Transfer-Encoding") or "").strip().lower()
+        if cte not in ("base64", "quoted-printable"):
+            continue
+        payload = part.get_payload(decode=False)
+        if not isinstance(payload, str) or not payload.strip():
+            continue
+        try:
+            decoded = part.get_payload(decode=True)
+        except Exception:  # noqa: BLE001
+            continue
+        if not decoded:
+            continue
+        if _is_container(decoded):
+            cleaned, ok = _clean_archive(decoded, blob)
+            new = cleaned if ok else _TENC_WITHHELD
+        else:
+            new = redact_contact(blob(decoded))
+        if new == decoded:
+            continue                       # nothing masked -> leave bytes untouched
+        # locate the exact original encoded body in raw (surrogateescape round-trips
+        # the bytes the parser read); advance a cursor so identical payloads in
+        # later parts still resolve in order.
+        enc = payload.encode("ascii", "surrogateescape")
+        pos = raw.find(enc, cursor)
+        if pos < 0:
+            pos = raw.find(enc)
+        if pos < 0:
+            continue                       # cannot place it -> gate will fail closed
+        cursor = pos + len(enc)
+        edits.append((pos, pos + len(enc), _reencode_part(new, cte, enc)))
+    if not edits:
+        return raw
+    edits.sort()
+    out, last = bytearray(), 0
+    for s, e, repl in edits:
+        out += raw[last:s] + repl
+        last = e
+    out += raw[last:]
+    return bytes(out)
+
+
 def obfuscate(db: str) -> None:
     salt = get_salt()
     repl_t, repl_b, text, name, blob = make_repl(salt)
@@ -697,7 +786,12 @@ def obfuscate(db: str) -> None:
         nsubj = text(subj)
         nbody = redact_contact(text(body))
         nbhtml = redact_contact(text(bhtml))
-        nraw = redact_contact(blob(raw))
+        # blob() masks cleartext in headers and unencoded parts; _scrub_transfer
+        # _encoded then reaches addresses buried in base64 / QP MIME parts that the
+        # byte-level pass cannot see (base64 has no '@'; QP can split an address
+        # across a soft line-break). base64 regions are inert to blob() -- their
+        # alphabet has no '@', ' at ', or '%' -- so running blob() first is safe.
+        nraw = _scrub_transfer_encoded(redact_contact(blob(raw)), blob)
         if (nmsgid, nirt, nfn, nfe, nsubj, nbody, nbhtml, nraw) != \
                 (msgid, irt, ofn, fe, subj, body, bhtml, raw):
             conn.execute(
