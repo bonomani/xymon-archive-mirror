@@ -78,8 +78,9 @@ pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
 .md pre{background:#f6f8fa} .md img{max-width:100%}
 /* one rhythm everywhere: blocks have no margin, so spacing comes only from
    line-height and the single <br> blank lines kept by the sanitizer */
-.md p,.md div,.md blockquote,.md table{margin:0}
-.md blockquote{padding-left:10px;border-left:2px solid #ddd;color:#555}
+.md p,.md div,.md table{margin:0}
+.md blockquote{margin:6px 0 6px 6px;padding-left:7px;
+    border-left:2px solid #ddd;color:#555}
 ul.thread,ul.thread ul{list-style:none;padding-left:15px;
     border-left:1px solid #e8e8e8;margin:2px 0}
 ul.thread li{margin:4px 0}
