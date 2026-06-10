@@ -1228,9 +1228,12 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
         bidx.append(" ".join(w for w, k in zip(words, keep) if k))
     (out / "search-index.json").write_text(
         json.dumps(sidx, separators=(",", ":"), ensure_ascii=False), "utf-8")
+    # mtime=0 -> reproducible .gz bytes (same content = same file), like the
+    # `gzip -n` pack-db.sh already uses: golden diffs become plain `diff -r`
+    # and unchanged artifacts stop churning in deploys/mirrors.
     (out / "body-index.json.gz").write_bytes(gzip.compress(
         json.dumps(bidx, separators=(",", ":"), ensure_ascii=False)
-        .encode("utf-8"), 9))
+        .encode("utf-8"), 9, mtime=0))
 
     # ---- incremental change detection (Phase 1): the ~tens-of-thousands of
     # per-message pages dominate the build. With INCREMENTAL=1 and a previous
@@ -1281,7 +1284,8 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
         if raws:
             mbox = b"".join(rb if rb.endswith(b"\n") else rb + b"\n"
                             for rb in raws)
-            (out / f"{m}.txt.gz").write_bytes(gzip.compress(mbox, 9))
+            (out / f"{m}.txt.gz").write_bytes(
+                gzip.compress(mbox, 9, mtime=0))   # reproducible (gzip -n)
             mbox_link = f" &middot; <a href='{e(m)}.txt.gz'>mbox.gz</a>"
 
         nav = (f"<p class=meta>{len(rows)} messages{mbox_link} &middot; "
