@@ -430,22 +430,57 @@ document.addEventListener('click',function(ev){
   function ok(){b.innerHTML='\\u2713';setTimeout(function(){b.innerHTML=old;},1200);}
   if(navigator.clipboard) navigator.clipboard.writeText(text).then(ok,function(){});
 });
-// fetch a whole thread and inject it inline (Threads/Search/Archive expand in
-// place). Rewrites ../ links since callers sit at the site root.
-function loadThread(box,tid,fallback){
+// THE inline-expansion pipeline: fetch a generated page, extract `o.sel`,
+// strip its chrome (`o.strip` + optional `o.post`), rewrite ../ links (callers
+// sit at the site root), inject into `box`, then enhance/fold/tidy and
+// highlight `o.terms`. Every expander (Threads tab, search/archive message
+// expand, the Archive month accordion) goes through here, so failure UX,
+// link rewriting and highlighting cannot drift between them.
+// Racing loads on one box: the latest call wins (per-box token).
+function inject(box,url,o){
+  o=o||{};
+  var tok=(box._itok=(box._itok||0)+1);
+  box.setAttribute('aria-busy','true');
   box.innerHTML='<p class=meta>Loading\\u2026</p>';
-  fetch('thread/'+tid+'.html').then(function(r){return r.text();}).then(function(t){
-    var el=new DOMParser().parseFromString(t,'text/html').querySelector('.thread');
-    if(!el){box.innerHTML="<p class=meta><a href='"+fallback+"'>open thread</a></p>";return;}
-    el.querySelectorAll('h1,.thread>.meta').forEach(function(n){n.remove();});
-    el.querySelectorAll('a[href$="index.html"]').forEach(function(a){
-      var p=a.closest('p'); if(p&&p.parentNode===el)p.remove();});
-    el.querySelectorAll('[href^="../"]').forEach(function(a){a.setAttribute('href',a.getAttribute('href').slice(3));});
-    el.querySelectorAll('[src^="../"]').forEach(function(a){a.setAttribute('src',a.getAttribute('src').slice(3));});
-    box.innerHTML=el.innerHTML;
+  function fail(){
+    if(box._itok!==tok) return;
+    box.removeAttribute('aria-busy');
+    box.innerHTML=o.fallback
+      ?"<p class=meta><a href='"+o.fallback+"'>open \\u2192</a></p>"
+      :'<p class=meta>Failed to load.</p>';
+  }
+  fetch(url).then(function(r){return r.text();}).then(function(t){
+    if(box._itok!==tok) return;
+    if(o.sel){
+      var el=new DOMParser().parseFromString(t,'text/html').querySelector(o.sel);
+      if(!el){fail();return;}
+      if(o.strip) el.querySelectorAll(o.strip).forEach(function(n){n.remove();});
+      if(o.post) o.post(el);
+      el.querySelectorAll('[href^="../"]').forEach(function(a){a.setAttribute('href',a.getAttribute('href').slice(3));});
+      el.querySelectorAll('[src^="../"]').forEach(function(a){a.setAttribute('src',a.getAttribute('src').slice(3));});
+      box.innerHTML=el.innerHTML;
+    } else {
+      box.innerHTML=t;            // pre-rendered fragment (frag/<month>.html)
+    }
+    box.removeAttribute('aria-busy');
     if(window.enhance)enhance(box); if(window.foldQuotes)foldQuotes(box);
     if(window.tidyBreaks)tidyBreaks(box);
-  }).catch(function(){box.innerHTML="<p class=meta><a href='"+fallback+"'>open thread</a></p>";});
+    if(o.terms&&o.terms.length)hlTerms(box,o.terms);
+  }).catch(fail);
+}
+// terms currently in the search box, for highlighting injected content
+function curTerms(){
+  var qel=document.getElementById('q');
+  return qel?qel.value.toLowerCase().split(/\\s+/).filter(Boolean):[];
+}
+// fetch a whole thread and inject it inline (Threads/Search/Archive expand in
+// place); search terms are highlighted in the expanded thread too.
+function loadThread(box,tid,fallback){
+  inject(box,'thread/'+tid+'.html',{sel:'.thread',strip:'h1,.thread>.meta',
+    fallback:fallback,terms:curTerms(),
+    post:function(el){              // drop the "<- index" footer paragraphs
+      el.querySelectorAll('a[href$="index.html"]').forEach(function(a){
+        var p=a.closest('p'); if(p&&p.parentNode===el)p.remove();});}});
 }
 // highlight search terms (wrap in <mark>) inside an element's text nodes.
 function hlTerms(box,terms){
@@ -469,20 +504,10 @@ function hlTerms(box,terms){
   });
 }
 // fetch one canonical message page and inject its body inline; highlight terms.
+// Body only -- the subject/author/date already show on the result/archive line.
 function loadMsg(box,mid,terms){
-  box.innerHTML='<p class=meta>Loading\\u2026</p>';
-  fetch('msg/'+mid+'.html').then(function(r){return r.text();}).then(function(t){
-    var el=new DOMParser().parseFromString(t,'text/html').querySelector('.msg');
-    if(!el){box.innerHTML='';return;}
-    // body only -- the subject/author/date already show on the result/archive line
-    el.querySelectorAll('h1,p.meta').forEach(function(n){n.remove();});
-    el.querySelectorAll('[href^="../"]').forEach(function(a){a.setAttribute('href',a.getAttribute('href').slice(3));});
-    el.querySelectorAll('[src^="../"]').forEach(function(a){a.setAttribute('src',a.getAttribute('src').slice(3));});
-    box.innerHTML=el.innerHTML;
-    if(window.enhance)enhance(box); if(window.foldQuotes)foldQuotes(box);
-    if(window.tidyBreaks)tidyBreaks(box);
-    hlTerms(box,terms);
-  }).catch(function(){box.innerHTML='';});
+  inject(box,'msg/'+mid+'.html',{sel:'.msg',strip:'h1,p.meta',
+    fallback:'msg/'+mid+'.html',terms:terms});
 }
 // a link marked .xpand[data-mid] expands that single MESSAGE inline (search/archive);
 // thread links navigate normally to the thread page.
@@ -561,18 +586,14 @@ fetch('search-index.json').then(r=>{
  .catch(()=>{stat.textContent=
    'Could not load the search index \\u2014 check the connection and reload.';});
 
-function hl(text, terms){                  // bold the matched terms (safely)
-  const frag=document.createDocumentFragment(), low=text.toLowerCase();
-  let i=0;
-  while(i<text.length){
-    let at=-1, len=0;
-    for(const t of terms){const p=low.indexOf(t,i);
-      if(p>=0&&(at<0||p<at)){at=p;len=t.length;}}
-    if(at<0){frag.appendChild(document.createTextNode(text.slice(i))); break;}
-    if(at>i) frag.appendChild(document.createTextNode(text.slice(i,at)));
-    const b=document.createElement('mark'); b.textContent=text.slice(at,at+len);
-    frag.appendChild(b); i=at+len;
-  }
+function hl(text, terms){   // bold the matched terms -- one scanner for the
+  // whole site: delegates to hlTerms (script.js), so previews and injected
+  // messages can never highlight differently. script.js is deferred; on the
+  // rare first paint before it runs the preview is just unhighlighted (the
+  // next keystroke re-runs).
+  const frag=document.createDocumentFragment();
+  frag.appendChild(document.createTextNode(text));
+  if(typeof hlTerms==='function') hlTerms(frag,terms);
   return frag;
 }
 function snippets(text, terms, max){        // up to `max` distinct hit windows
@@ -590,9 +611,6 @@ function snippets(text, terms, max){        // up to `max` distinct hit windows
              +(b<text.length?'\\u2026':''));
   }
   return out;
-}
-function snipKey(sn){                       // normalize for de-duplication
-  return sn.toLowerCase().replace(/[>\\s\\u2026]+/g,' ').trim();
 }
 function run(){
   if(!DATA.length) return;                  // subject index still loading
@@ -919,11 +937,9 @@ def render_threads(rows, att_counts=None) -> str:
 _ARCHIVE_JS = """
 <script>
 function loadFrag(panel, frag){
-  panel.dataset.frag = frag;
-  panel.innerHTML = '<p class=meta>Loading\\u2026</p>';
-  fetch('frag/' + encodeURIComponent(frag) + '.html').then(function(r){ return r.text(); })
-    .then(function(h){ if (panel.dataset.frag === frag) panel.innerHTML = h; })
-    .catch(function(){ panel.innerHTML = '<p class=meta>Failed to load.</p>'; });
+  // shared injection pipeline (script.js); no `sel` -> raw fragment mode.
+  // Deferred script.js is loaded by the time a click can land here.
+  window.inject(panel, 'frag/' + encodeURIComponent(frag) + '.html', {});
 }
 document.querySelectorAll('.years .mgrid a[data-m]').forEach(function(a){
   a.addEventListener('click', function(e){
@@ -955,15 +971,17 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
     return x<y?1:(x>y?-1:0);});
   document.getElementById('tstat').textContent=G.length.toLocaleString()+' threads';
   var shown=0,B=50,list=document.getElementById('tlist'),more=document.getElementById('tmore');
-  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':s;return d.innerHTML;}
   var load=window.loadThread;   // shared inline-thread loader (defined in script.js)
   function addThread(idx){
     var f=D[idx[0]],last=(D[idx[idx.length-1]][3]||'').slice(0,10),n=idx.length,tid=f[6];
     var fb=tid?'thread/'+tid+'.html':'msg/'+f[0]+'.html',loaded=false;
     var li=document.createElement('li');
     var tg=document.createElement('div');tg.className='thtoggle';
-    tg.innerHTML=esc(f[1]||'(no subject)')+' <span class=meta>&middot; '+esc(f[2])+
-      ' &middot; '+last+' &middot; '+n+' message'+(n>1?'s':'')+'</span>';
+    tg.appendChild(document.createTextNode(f[1]||'(no subject)'));
+    var sm=document.createElement('span');sm.className='meta';
+    sm.textContent=' \\u00b7 '+(f[2]||'')+' \\u00b7 '+last+
+      ' \\u00b7 '+n+' message'+(n>1?'s':'');
+    tg.appendChild(sm);
     var box=document.createElement('div');box.className='thmsgs';box.hidden=true;
     tg.addEventListener('click',function(){
       this.classList.toggle('thopen');box.hidden=!box.hidden;
