@@ -997,15 +997,52 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 # (not the data), so the incremental manifest re-renders all pages once.
 RENDER_VERSION = "10-seo-meta"
 
+# The four index tabs (label, href) in display order; the Search tab is the
+# site root. One list feeds the tab bar, the page writer AND the sitemap, so
+# a new tab cannot be added to one and forgotten in another.
+_TABS = (("Search", "index.html"), ("Threads", "index-latest.html"),
+         ("Archive", "index-year.html"), ("Stats", "index-dashboard.html"))
+
 
 def build(db: Path, out: Path, base_url: str = "") -> None:
+    """Render the whole site: a thin orchestrator over the phase functions
+    below (load -> assets -> index tabs -> search indexes -> months ->
+    threads -> SEO), each independently testable against a fixture DB."""
     global _BASE
     _BASE = (base_url or "").rstrip("/")
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     has_tid = "thread_id" in {r[1] for r in
                               conn.execute("PRAGMA table_info(message)")}
+    _load_names(conn)
+    _prepare_out(out)
+    atts_by_msgid, att_counts, att_msg_per_month = _load_attachments(conn)
 
+    months = [r[0] for r in conn.execute(
+        "SELECT DISTINCT month FROM message")]
+    months.sort(key=month_key, reverse=True)
+    counts = {m: conn.execute(
+        "SELECT COUNT(*) FROM message WHERE month=?", (m,)).fetchone()[0]
+        for m in months}
+    years: dict[str, list[str]] = {}
+    for m in months:
+        years.setdefault(m.split("-", 1)[0], []).append(m)
+    total = sum(counts.values())
+    yrs = sorted(years)
+    span = f"{yrs[0]}–{yrs[-1]}" if yrs else ""
+
+    _write_index_tabs(conn, out, counts, years, total, span,
+                      att_msg_per_month)
+    tid_of = _search_grouping(conn)
+    sidx = _write_search_indexes(conn, out, has_tid, att_counts, tid_of)
+    _write_month_pages(conn, out, months, att_counts, has_tid)
+    bythread = _write_thread_pages(conn, out, has_tid, atts_by_msgid)
+    _write_seo(out, months, bythread, sidx)
+    conn.close()
+    print(f"Generated site in {out}/ ({len(months)} months)")
+
+
+def _load_names(conn) -> None:
     # map each (pseudonymised) sender address to its most-used display name, to
     # backfill messages whose From had only a bare address (see whom()).
     _NAMES.clear()
@@ -1020,6 +1057,8 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     for em, names in _cnt.items():
         _NAMES[em] = max(names, key=names.get)
 
+
+def _prepare_out(out: Path) -> None:
     out.mkdir(parents=True, exist_ok=True)
     (out / "msg").mkdir(exist_ok=True)   # canonical single-message permalink pages
     (out / "att").mkdir(exist_ok=True)
@@ -1044,7 +1083,10 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
             for old in sub.glob(pat):
                 old.unlink()
 
-    # attachments grouped by their message (msgid)
+
+def _load_attachments(conn):
+    """Attachments grouped by their message (msgid):
+    (atts_by_msgid, att_counts, att_msg_per_month)."""
     atts_by_msgid: dict[str, list] = defaultdict(list)
     for a in conn.execute(
             "SELECT id, msgid, filename, content_type, size, content "
@@ -1054,23 +1096,12 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     att_msg_per_month = dict(conn.execute(
         "SELECT month, COUNT(DISTINCT msgid) FROM attachment "
         "WHERE msgid IS NOT NULL GROUP BY month"))
+    return atts_by_msgid, att_counts, att_msg_per_month
 
-    months = [r[0] for r in conn.execute(
-        "SELECT DISTINCT month FROM message")]
-    months.sort(key=month_key, reverse=True)
 
-    # ---- index: years -> months
-    counts = {m: conn.execute(
-        "SELECT COUNT(*) FROM message WHERE month=?", (m,)).fetchone()[0]
-        for m in months}
-    years: dict[str, list[str]] = {}
-    for m in months:
-        years.setdefault(m.split("-", 1)[0], []).append(m)
-
-    total = sum(counts.values())
-    yrs = sorted(years)
-    span = f"{yrs[0]}–{yrs[-1]}" if yrs else ""
-
+def _write_index_tabs(conn, out: Path, counts, years, total, span,
+                      att_msg_per_month) -> None:
+    """The four tab pages: Search (hero + widget), Threads, Archive, Stats."""
     # --- browse-by-year grid (anchored so the activity bars can link to it)
     # classic Pipermail-style calendar: every year shows all 12 months in a
     # 4-per-row grid; months with mail are links (count on hover), rest greyed.
@@ -1130,15 +1161,13 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
             f" &middot; addresses pseudonymised</p></div>")
     # single-section layouts (hero shared); the tab label IS the section name,
     # so there is no separate heading. Search box lives only on the Search tab.
-    _LAYOUTS = [("Search", "index.html", ""),
-                ("Threads", "index-latest.html", recent),
-                ("Archive", "index-year.html", grid),
-                ("Stats", "index-dashboard.html", bars)]
+    sections = {"index.html": "", "index-latest.html": recent,
+                "index-year.html": grid, "index-dashboard.html": bars}
 
     def tabs(current):
         parts = [(f"<b>{lbl}</b>" if lbl == current
                   else f"<a href='{href}'>{lbl}</a>")
-                 for lbl, href, _ in _LAYOUTS]
+                 for lbl, href in _TABS]
         return "<p class=altlinks>" + " | ".join(parts) + "</p>"
 
     # the full search widget, minus its own <h1> and the descriptive blurb --
@@ -1159,18 +1188,21 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
         "index-dashboard.html": "Activity statistics for the Xymon mailing "
                                 "list archive.",
     }
-    for lbl, href, section in _LAYOUTS:
+    for lbl, href in _TABS:
         # the search box lives only on the Search tab, not on Archive / Stats
         mid = widget if href == "index.html" else ""
         (out / href).write_text(
-            page("Xymon Archive", hero + tabs(lbl) + mid + section,
+            page("Xymon Archive", hero + tabs(lbl) + mid + sections[href],
                  header=False, desc=_tab_desc.get(href),
                  canon="" if href == "index.html" else href), "utf-8")
 
-    # thread id per message (reply links + shared distinctive subject), so the
-    # client can group search hits under their thread. Same grouping as the
-    # month tree: threads.components(). The [5] key only needs the partition,
-    # numbered in row order, so the output is stable across implementations.
+
+def _search_grouping(conn) -> dict:
+    """Per-message thread-group key (reply links + shared distinctive
+    subject), so the client can group search hits under their thread. Same
+    grouping as the month tree: threads.components(). The [5] key only needs
+    the partition, numbered in row order, so the output is stable across
+    implementations."""
     trows = conn.execute(
         "SELECT id, msgid, in_reply_to, subject FROM message").fetchall()
     group_of = {r["id"]: root
@@ -1179,7 +1211,13 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     roots, tid_of = {}, {}
     for r in trows:
         tid_of[r["id"]] = roots.setdefault(group_of[r["id"]], len(roots))
+    return tid_of
 
+
+def _write_search_indexes(conn, out: Path, has_tid, att_counts,
+                          tid_of) -> list:
+    """Write search-index.json + body-index.json.gz; returns the rows (sidx)
+    so the sitemap can enumerate the msg/ pages."""
     # ---- search indexes (dependency-free client side):
     #   search-index.json    small: subject + author + date + att flag + thread
     #   body-index.json.gz   bodies, aligned by row order; loaded for deep search
@@ -1234,15 +1272,18 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     (out / "body-index.json.gz").write_bytes(gzip.compress(
         json.dumps(bidx, separators=(",", ":"), ensure_ascii=False)
         .encode("utf-8"), 9, mtime=0))
+    return sidx
 
-    # ---- incremental change detection (Phase 1): the ~tens-of-thousands of
-    # per-message pages dominate the build. With INCREMENTAL=1 and a previous
-    # site/.manifest.json (restored from CI cache), only pages whose input
-    # changed are re-rendered; the rest are kept from the cached site. A page's
-    # Incremental manifest, keyed by THREAD. There are no per-message pages: a
-    # message's permalink is thread/<tid>.html#m-<id>. A thread re-renders when
-    # any member's content (or RENDER_VERSION) changes; the thread sigs are
-    # computed in the thread pass below. No manifest / INCREMENTAL unset -> full.
+
+def _read_manifest(out: Path):
+    """(manifest_path, old_threads, incremental) for the thread pass.
+
+    Incremental change detection: the ~tens-of-thousands of per-message pages
+    dominate the build. With INCREMENTAL=1 and a previous site/.manifest.json
+    (restored from CI cache), only pages whose input changed are re-rendered;
+    the rest are kept from the cached site. The manifest is keyed by THREAD:
+    a thread re-renders when any member's content (or RENDER_VERSION)
+    changes. No manifest / INCREMENTAL unset -> full rebuild."""
     manifest_path = out / ".manifest.json"
     old_manifest: dict = {}
     if manifest_path.exists():
@@ -1258,8 +1299,12 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     assets_changed = old_manifest.get("assets") != [_JS_NAME, _CSS_NAME]
     incremental = (os.environ.get("INCREMENTAL") == "1"
                    and bool(old_threads) and not assets_changed)
+    return manifest_path, old_threads, incremental
 
-    # ---- per-month pages (the per-message pages were dropped; see thread pass)
+
+def _write_month_pages(conn, out: Path, months, att_counts, has_tid) -> None:
+    """Per-month pages + accordion fragments + downloadable mbox.gz (the
+    per-message pages were dropped; see the thread pass)."""
     for m in months:
         rows = conn.execute(
             f"""SELECT id, msgid, in_reply_to, subject, from_name, from_email,
@@ -1301,11 +1346,15 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
         (out / "frag" / f"{m}.html").write_text(
             f"<p class=meta>{len(rows)} messages</p>{content}", "utf-8")
 
-    # ---- thread pages: ONE page per thread, every message in order, each a
-    # collapsible <details> block anchored #m-<id> (that anchor IS the message
-    # permalink -- there are no per-message pages). Carries the full body,
-    # author/date/source and the message's attachments. Incremental: a thread
-    # re-renders only when its content signature (or RENDER_VERSION) changes.
+
+def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
+    """Thread pages: ONE page per thread, every message in order, each a
+    collapsible <details> block anchored #m-<id> (that anchor IS the message
+    permalink); the canonical msg/ pages are written alongside. Carries the
+    full body, author/date/source and the message's attachments. Incremental:
+    a thread re-renders only when its content signature (or RENDER_VERSION)
+    changes. Returns the thread map (its keys feed the sitemap)."""
+    manifest_path, old_threads, incremental = _read_manifest(out)
     (out / "thread").mkdir(exist_ok=True)
     bythread: dict = defaultdict(list)
     for r in conn.execute("SELECT * FROM message").fetchall():
@@ -1331,8 +1380,7 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
 
     new_threads, nth = {}, 0
     for tid, members in bythread.items():
-        members.sort(key=lambda r: (r["date_iso"] is None,
-                                    r["date_iso"] or "", r["id"]))
+        members.sort(key=threads.order)        # the one shared chronology
         sig = hashlib.blake2b(("\x00".join(
             [RENDER_VERSION] +
             ["\x1f".join([msg_name(r), r["subject"] or "", whom(r),
@@ -1404,10 +1452,13 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     manifest_path.write_text(
         json.dumps({"threads": new_threads, "assets": [_JS_NAME, _CSS_NAME]},
                    separators=(",", ":")), "utf-8")
+    return bythread
 
-    # ---- discoverability scaffolding: favicon, custom 404, robots, sitemap.
-    # The sitemap and robots' Sitemap line need absolute URLs, so they appear
-    # only when a base URL is known (CI); the rest is emitted unconditionally.
+
+def _write_seo(out: Path, months, bythread, sidx) -> None:
+    """Discoverability scaffolding: favicon, custom 404, robots, sitemap.
+    The sitemap and robots' Sitemap line need absolute URLs, so they appear
+    only when a base URL is known (CI); the rest is emitted unconditionally."""
     (out / "favicon.svg").write_text(_FAVICON, "utf-8")
     (out / "404.html").write_text(_not_found_page(), "utf-8")
     _prefix = urlsplit(_BASE).path if _BASE else ""
@@ -1417,13 +1468,10 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     (out / "robots.txt").write_text(robots, "utf-8")
     if _BASE:
         _write_sitemaps(out, (
-            [""] + [h for _, h, _ in _LAYOUTS if h != "index.html"]
+            [""] + [h for _, h in _TABS if h != "index.html"]
             + [f"{m}.html" for m in months]
             + [f"thread/{t}.html" for t in sorted(bythread)]
             + [f"msg/{row[0]}.html" for row in sidx]))
-
-    conn.close()
-    print(f"Generated site in {out}/ ({len(months)} months)")
 
 
 def main() -> None:
