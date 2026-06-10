@@ -9,6 +9,7 @@ agnostic.
 from __future__ import annotations
 
 import base64
+import email
 import html
 import re
 import sqlite3
@@ -470,6 +471,37 @@ def gh_discussion_rows(disc: dict) -> list[dict]:
             rows.append(row(r, re_subj, (r.get("replyTo") or {}).get("id")
                                          or c["id"]))
     return rows
+
+
+# An mbox "From " envelope line ends with an asctime "HH:MM:SS YYYY", and a
+# real separator sits at the start of the file or after a blank line (the
+# blank-line rule rejects forwarded "From ..." lines quoted inside a body).
+# Matching this ourselves (rather than mailbox.mbox) also avoids its ASCII
+# decode of the From_ line, which crashes on non-ASCII sender names and would
+# silently drop an entire month.
+_MBOX_FROM = re.compile(
+    rb"(?m)(?:\A|(?<=\n\n))From .+\d{2}:\d{2}:\d{2} \d{4}\s*?$")
+
+
+def iter_mbox(raw: bytes):
+    """Split raw mbox bytes; yield ``(chunk, email.message.Message)``.
+
+    THE one mbox splitter (Pipermail crawler + local-export import -- the
+    import once carried its own copy WITHOUT the unescape, leaving stray
+    ">From " in imported bodies). ``chunk`` is the full original entry
+    (From_ line through the next separator), kept verbatim so a month's
+    mbox can be regenerated for download; the parsed payload gets mboxrd
+    unescaping (one ">" peeled off ">From " lines)."""
+    starts = [m.start() for m in _MBOX_FROM.finditer(raw)]
+    if not starts:
+        return
+    starts.append(len(raw))
+    for i in range(len(starts) - 1):
+        chunk = raw[starts[i]:starts[i + 1]]
+        nl = chunk.find(b"\n")                       # drop the From_ envelope
+        payload = chunk[nl + 1:] if nl != -1 else b""
+        payload = re.sub(rb"(?m)^>(>*From )", rb"\1", payload)
+        yield chunk, email.message_from_bytes(payload)
 
 
 _MONTH_NAMES = {

@@ -13,31 +13,15 @@ Differences from crawl.py:
 from __future__ import annotations
 
 import argparse
-import email
 import re
-import sqlite3
 from pathlib import Path
 
 import mailstore
 from fetch_attachments import KEEP
 
-# mbox separator: "From <addr> <asctime>" at start-of-file or after a blank line
-_FROM = re.compile(rb"(?m)(?:\A|(?<=\n\n))From .+\d{2}:\d{2}:\d{2} \d{4}\s*?$")
 _VIA = re.compile(r"\s+via\s+Xymon\s*$", re.I)
 _KEEP_CT = {"text/x-patch", "text/x-diff", "application/zip",
             "application/gzip", "application/x-tar", "application/x-gtar"}
-
-
-def iter_mbox(raw: bytes):
-    starts = [m.start() for m in _FROM.finditer(raw)]
-    if not starts:
-        return
-    starts.append(len(raw))
-    for i in range(len(starts) - 1):
-        chunk = raw[starts[i]:starts[i + 1]]
-        nl = chunk.find(b"\n")
-        payload = chunk[nl + 1:] if nl != -1 else b""
-        yield chunk, email.message_from_bytes(payload)
 
 
 def inline_attachments(msg, msgid, month) -> list[dict]:
@@ -77,7 +61,9 @@ def main() -> None:
     raw = args.mbox.read_bytes()
 
     rows, atts = [], []
-    for chunk, msg in iter_mbox(raw):
+    # the shared splitter also unescapes mboxrd ">From " quoting -- this
+    # importer's own copy didn't, leaving stray ">" on such lines in bodies
+    for chunk, msg in mailstore.iter_mbox(raw):
         row = mailstore.message_to_row(msg, month=None)   # month from Date
         if row["from_name"]:
             row["from_name"] = _VIA.sub("", row["from_name"]).strip()

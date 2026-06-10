@@ -7,7 +7,6 @@ exposes at ``xymon/<YYYY-Month>.txt.gz`` -- far cleaner than scraping HTML.
 from __future__ import annotations
 
 import argparse
-import email
 import re
 import sqlite3
 import time
@@ -22,16 +21,6 @@ LIST = "xymon"
 UA = "xymon-discussion-public/1.0 (+stdlib crawler)"
 _MAX_FETCH = 100 * 1024 * 1024     # cap a single download (compressed)
 _MAX_GUNZIP = 500 * 1024 * 1024    # cap the decompressed mbox (gzip-bomb guard)
-
-# An mbox "From " envelope line ends with an asctime "HH:MM:SS YYYY", and a
-# real separator sits at the start of the file or after a blank line (the
-# blank-line rule rejects forwarded "From ..." lines quoted inside a body).
-# Matching this ourselves (rather than mailbox.mbox) also avoids its ASCII
-# decode of the From_ line, which crashes on non-ASCII sender names and would
-# silently drop an entire month.
-_FROM = re.compile(
-    rb"(?m)(?:\A|(?<=\n\n))From .+\d{2}:\d{2}:\d{2} \d{4}\s*?$")
-
 
 def fetch(url: str) -> bytes:
     """Capped GET via the shared hardened layer (webfetch)."""
@@ -54,29 +43,10 @@ def list_months() -> list[str]:
     return seen
 
 
-def _iter_mbox(raw: bytes) -> Iterator[tuple[bytes, email.message.Message]]:
-    """Split raw mbox bytes; yield (chunk, message).
-
-    ``chunk`` is the full original mbox entry (From_ line through the next
-    separator) -- kept verbatim so the month's mbox can be regenerated for
-    download. The parsed message uses the payload with mboxrd unescaping.
-    """
-    starts = [m.start() for m in _FROM.finditer(raw)]
-    if not starts:
-        return
-    starts.append(len(raw))
-    for i in range(len(starts) - 1):
-        chunk = raw[starts[i]:starts[i + 1]]
-        nl = chunk.find(b"\n")                       # drop the From_ envelope
-        payload = chunk[nl + 1:] if nl != -1 else b""
-        payload = re.sub(rb"(?m)^>(>*From )", rb"\1", payload)   # mboxrd unescape
-        yield chunk, email.message_from_bytes(payload)
-
-
 def parse_month(month: str) -> Iterator[dict]:
     """Download and parse one month's mbox into message dicts."""
     raw = _gunzip_bounded(fetch(f"{BASE}{LIST}/{month}.txt.gz"))
-    for chunk, msg in _iter_mbox(raw):
+    for chunk, msg in mailstore.iter_mbox(raw):
         row = mailstore.message_to_row(msg, month=month, raw=chunk)
         row["raw"] = chunk
         yield row

@@ -636,6 +636,36 @@ def test_fetch_attachments_rejects_unsafe_urls():
         assert raised, bad
 
 
+# --- mailstore.iter_mbox: the one mbox splitter --------------------------------
+
+def test_iter_mbox_unescapes_mboxrd_but_keeps_chunk_verbatim():
+    raw = (b"From a@b Mon Jan  1 00:00:00 2024\n"
+           b"Message-Id: <1@x>\n\n"
+           b"body\n"
+           b">From the export it was escaped\n"
+           b">>From quoted text keeps one marker\n"
+           b"\n"
+           b"From c@d Mon Jan  1 00:00:01 2024\n"
+           b"Message-Id: <2@x>\n\nsecond\n")
+    out = list(mailstore.iter_mbox(raw))
+    assert len(out) == 2
+    chunk, msg = out[0]
+    body = msg.get_payload()
+    # one ">" peeled (mboxrd): escaped line restored, quoted line keeps one
+    assert "\nFrom the export it was escaped\n" in body
+    assert "\n>From quoted text keeps one marker\n" in body
+    assert b">From the export" in chunk          # chunk stays byte-verbatim
+    assert out[1][1]["Message-Id"] == "<2@x>"
+
+
+def test_iter_mbox_quoted_from_inside_body_is_not_a_separator():
+    raw = (b"From a@b Mon Jan  1 00:00:00 2024\n"
+           b"Message-Id: <1@x>\n\n"
+           b"He said:\nFrom Mon Jan  1 12:00:00 2024 onwards it broke\n")
+    out = list(mailstore.iter_mbox(raw))
+    assert len(out) == 1                  # no blank line -> not a separator
+
+
 # --- webfetch: the one shared hardened HTTP layer ------------------------------
 
 def test_webfetch_allowlist_rejects_unsafe_urls():
