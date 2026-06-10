@@ -51,6 +51,24 @@ def test_empty_block_no_backtracking():
     assert "div" not in out.lower()          # empty block collapsed away
 
 
+def test_list_footer_no_backtracking_before_long_html_disclaimer():
+    footer = (
+        "_______________________________________________<br>"
+        "Xymon mailing list<br>"
+        '<a href="mailto:xymon@xymon.com">xymon@xymon.com</a><br>'
+        '<a href="http://lists.xymon.com/mailman/listinfo/xymon">'
+        "http://lists.xymon.com/mailman/listinfo/xymon</a><br>"
+    )
+    disclaimer = ("</blockquote></div><table><tr><td><div><p>"
+                  + "This message remains visible. " * 300
+                  + "</p></div></td></tr></table>")
+    t0 = time.time()
+    out = render_body.strip_list_footers(footer + disclaimer)
+    assert time.time() - t0 < 0.5
+    assert "mailing list" not in out and "listinfo" not in out
+    assert "This message remains visible" in out
+
+
 # --- mailstore.html_part (recover the detached HTML body) ----------------------
 
 def test_html_part_captures_attachment_html():

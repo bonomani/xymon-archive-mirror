@@ -75,25 +75,24 @@ console.log('1b) attribution colon is not split into the quote fold (NBSP glue)'
   assert(det && foldTxt.indexOf('Just') === 0, 'fold body starts at the quoted word, not the colon');
 }
 
-console.log('1b2) blockquote fold never hollows a pure-quote message');
+console.log('1b2) content-proven quote fold never hollows a short reply');
 {
-  // a message that is NOTHING but a quote (a pure forward, or every line
-  // '>'-prefixed) used to fold down to an empty body -- the blockquote path
-  // had no never-hollow guard (foldRange has one). The quote must stay
-  // visible when folding it would leave fewer than 3 visible words; a
-  // message with its own text keeps folding its quote as before.
-  const q = '<blockquote><pre>quoted words one two three four five six seven' +
-    '</pre></blockquote>';
+  // Structural blockquote markup alone is not proof. With an earlier matching
+  // message, content dedup may fold it only when at least three reply words stay
+  // visible; a one-word "Yes." keeps the quote open.
+  const qt = 'quoted words one two three four five six seven eight nine ten eleven twelve';
+  const q = '<blockquote><pre>' + qt + '</pre></blockquote>';
   const d = new JSDOM('<!doctype html><body data-root="./">' +
-    '<div class="tmsg"><div class="pt">' + q + '</div></div>' +
+    '<div class="tmsg"><div class="pt"><pre>' + qt + '</pre></div></div>' +
+    '<div class="tmsg"><div class="pt"><pre>Yes.</pre>' + q + '</div></div>' +
     '<div class="tmsg"><div class="pt"><pre>my own reply text here.</pre>' + q +
     '</div></div></body>', { url: 'https://x/' });
   setGlobals(d);
   foldQuotes(document);
-  const pure = document.querySelectorAll('.tmsg .pt')[0];
-  assert(!pure.querySelector('details.q') && visText(pure).includes('quoted words'),
-    'pure-quote message stays visible (not hollowed)');
-  const mixed = document.querySelectorAll('.tmsg .pt')[1];
+  const short = document.querySelectorAll('.tmsg .pt')[1];
+  assert(!short.querySelector('details.q') && visText(short).includes('quoted words'),
+    'one-word reply keeps its quote visible (not hollowed)');
+  const mixed = document.querySelectorAll('.tmsg .pt')[2];
   assert(mixed.querySelector('details.q') && visText(mixed).includes('my own reply'),
     'message with own text still folds its quote');
 }
@@ -104,25 +103,29 @@ console.log('1b3) mergeAdjacent does not swallow a sentence that merely contains
   // differing set of CVE-IDs:") matched ATTR by vocabulary and was merged
   // into the fold. Only attribution-SHAPED gaps (opener-led, or ending in
   // "wrote:") may merge; genuine attributions still do.
-  const dupA = 'first quoted passage about the security advisory identifiers listed in detail';
-  const dupB = 'second quoted passage with the changelog entries and the package upload notes';
   const mk = body => '<div class="tmsg"><div class="pt">' + body + '</div></div>';
-  const prior = mk('<pre>' + dupA + '\n\n' + dupB + '</pre>');
-  const reply = mk('<pre>My take below.</pre><blockquote><pre>' + dupA +
-    '</pre></blockquote><pre>But in the docs you wrote a slightly differing set of IDs:</pre>' +
-    '<blockquote><pre>' + dupB + '</pre></blockquote>');
-  const attrib = mk('<pre>Reply here.</pre><blockquote><pre>' + dupA +
-    '</pre></blockquote><pre>On Tue, Jul 23, 2019, Japheth Cleaver wrote:</pre>' +
-    '<blockquote><pre>' + dupB + '</pre></blockquote>');
-  const d = new JSDOM('<!doctype html><body data-root="./">' + prior + reply + attrib +
-    '</body>', { url: 'https://x/' });
+  const q = text => '<details class="q"><summary><span class="ar">▸</span></summary>' +
+    '<pre>' + text + '</pre></details>';
+  const reply = mk('<pre>My take below.</pre>' + q('first proven quote') +
+    '<pre>But in the docs you wrote a slightly differing set of IDs:</pre>' +
+    q('second proven quote'));
+  const attrib = mk('<pre>Reply here.</pre>' + q('first proven quote') +
+    '<pre>On Tue, Jul 23, 2019, Japheth Cleaver wrote:</pre>' +
+    q('second proven quote'));
+  const subject = mk('<pre>Reply here.</pre>' + q('first proven quote') +
+    '<pre>Subject: use the staging configuration here</pre>' +
+    q('second proven quote'));
+  const d = new JSDOM('<!doctype html><body data-root="./">' + reply + attrib +
+    subject + '</body>', { url: 'https://x/' });
   setGlobals(d);
   foldQuotes(document);
   const msgs = document.querySelectorAll('.tmsg .pt');
-  assert(visText(msgs[1]).includes('you wrote a slightly differing'),
+  assert(visText(msgs[0]).includes('you wrote a slightly differing'),
     'real sentence containing "wrote" stays visible between folds');
-  assert(!visText(msgs[2]).includes('Japheth Cleaver wrote'),
+  assert(!visText(msgs[1]).includes('Japheth Cleaver wrote'),
     'genuine attribution line still merges into the fold');
+  assert(visText(msgs[2]).includes('Subject: use the staging configuration'),
+    'one header-shaped prose line stays visible');
 }
 
 console.log('1d) thread page dedupes re-attached identical content');
@@ -169,6 +172,41 @@ console.log('1c) contentDedup keeps an isolated inline re-quote visible (not fol
     else if (c.nodeType === 1) w(c); }); })(msg);
   assert(node && !(node.parentElement && node.parentElement.closest('details.q')),
     'isolated inline re-quote stays visible (not folded into a fragment)');
+}
+
+console.log('1c2) contentDedup preserves short answers and edits inside copied text');
+{
+  // Raw newlines in <pre> are logical lines. Exact copied runs on each side may
+  // fold, but a one-word answer and one changed token must remain visible.
+  const lines = Array.from({ length: 5 }, (_, i) =>
+    Array.from({ length: 12 }, (_, j) => `a${i}_${j}`).join(' '));
+  const prior = '<div class="tmsg"><div class="pt"><pre>' +
+    lines.join('\n') + '</pre></div></div>';
+  const changed = lines[2].replace('a2_6', 'DISABLE_PRODUCTION_MODE');
+  const reply = '<div class="tmsg"><div class="pt"><pre>' +
+    ['My own introduction stays visible.', lines[0], lines[1], 'Yes.',
+      changed, lines[3], lines[4]].join('\n') + '</pre></div></div>';
+  const d = new JSDOM('<!doctype html><body data-root="./">' + prior + reply +
+    '</body>', { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const msg = document.querySelectorAll('.tmsg .pt')[1];
+  assert(msg.querySelectorAll('details.q').length === 2,
+    'raw <pre> lines form two exact-covered quote runs');
+  assert(visText(msg).includes('Yes.') &&
+         visText(msg).includes('DISABLE_PRODUCTION_MODE'),
+    'short answer and changed token stay visible');
+
+  const unicode = 'привет мир это длинная цитата сообщения для проверки точного ' +
+    'сопоставления слов в обсуждении сегодня снова';
+  const ud = new JSDOM('<!doctype html><body data-root="./">' +
+    '<div class="tmsg"><div class="pt"><pre>' + unicode + '</pre></div></div>' +
+    '<div class="tmsg"><div class="pt"><pre>Мой ответ остается видимым здесь.\n' +
+    unicode + '</pre></div></div></body>', { url: 'https://x/' });
+  setGlobals(ud);
+  foldQuotes(document);
+  assert(document.querySelectorAll('.tmsg .pt')[1].querySelector('details.q'),
+    'Unicode words participate in quote proof');
 }
 
 const idx = JSON.parse(fs.readFileSync(path.join(SITE, 'search-index.json'), 'utf8'));

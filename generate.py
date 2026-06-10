@@ -149,9 +149,9 @@ details.q[open]>summary .ar{transform:rotate(90deg)}
 details.q>blockquote,details.q>.md-q{margin-top:4px}
 """
 
-# Linked (not inlined) -> behaviour tweaks need no page re-render. Folds every
-# quoted block (<blockquote>) in a message body behind a toggle; runs on load
-# and is called again after the Threads tab injects a thread inline.
+# Linked (not inlined) -> behaviour tweaks need no page re-render. Folds text
+# proven to duplicate an earlier message; runs on load and is called again
+# after the Threads tab injects a thread inline.
 SCRIPT = """
 function foldQuotes(root){
   root=root||document;
@@ -161,38 +161,12 @@ function foldQuotes(root){
   function qsum(){ var s=document.createElement('summary');
     var a=document.createElement('span'); a.className='ar';
     a.textContent=String.fromCharCode(0x25B8); s.appendChild(a); return s; }
-  // visible words of an element, ignoring already-folded details.q content --
-  // the never-hollow guard for the blockquote path below (foldRange has its
-  // own; without one here a pure-quote message folded down to NOTHING).
+  // Visible words outside existing quote folds. Every folding path uses the
+  // same word-based never-hollow rule; character counts let "Yes" pass.
   function visWords(el){ var t=0; (function w(x){ [].forEach.call(x.childNodes,function(n){
     if(n.nodeType===1){ if(n.classList&&n.classList.contains('q')) return; w(n); }
     else if(n.nodeType===3) t+=(n.textContent.match(/\\S+/g)||[]).length; }); })(el);
     return t; }
-  root.querySelectorAll('blockquote').forEach(function(bq){
-    if(bq.closest('details.q')) return;           // outermost quote only
-    var host=bq.closest('.pt,.md');               // never hollow the message:
-    if(host && visWords(host)-visWords(bq)<3) return;  // keep the quote visible
-    // merge consecutive quotes: if only whitespace/<br> sits before this one and
-    // the node before that is an already-folded quote, append into it (one fold).
-    var prev=bq.previousSibling;
-    while(prev && ((prev.nodeType===3 && !prev.textContent.trim()) ||
-                   (prev.nodeType===1 && prev.tagName==='BR'))) prev=prev.previousSibling;
-    if(prev && prev.nodeType===1 && prev.tagName==='DETAILS' && prev.className==='q'){
-      var n=bq.previousSibling, mid=[];
-      while(n && n!==prev){ mid.unshift(n); n=n.previousSibling; }
-      mid.forEach(function(x){ prev.appendChild(x); }); prev.appendChild(bq);
-      return;
-    }
-    var d=document.createElement('details'); d.className='q';
-    d.appendChild(qsum()); bq.parentNode.insertBefore(d,bq); d.appendChild(bq);
-  });
-  // Outlook/Exchange "forward" quote: a From:/Sent:/To:/Subject: header block
-  // (no '>' markers) -> fold it and everything after. The header may be nested
-  // (div>div>p) so find a COMPACT element holding all 3 fields anywhere, then
-  // fold from its top-level block (direct child of the body) to the end.
-  var FROM=/(^|[\\n\\s])(From|Von|De|Da|Van|Fra|Från)\\s*:/i;
-  var SENT=/(Sent|Gesendet|Date|Envoy\\w*|Enviad\\w*|Inviat\\w*|Verzonden|Sendt|Skickat)\\s*:/i;
-  var SUBJ=/(Subject|Betreff|Objet|Asunto|Oggetto|Onderwerp|Assunto|Emne|Ämne)\\s*:/i;
   // "----- Original Message -----" separator (specific multi-locale phrases, not a
   // generic dashed line -> a STRONG forward signal without false matches).
   var ORIG=/-{2,}\\s*(Original Message|Ursprüngliche Nachricht|Message d'origine|Mensaje original|Messaggio originale|Oorspronkelijk bericht|Oprindelig meddelelse|Ursprungligt meddelande|Opprinnelig melding)\\s*-{2,}/i;
@@ -201,6 +175,7 @@ function foldQuotes(root){
   // a single header-field line (From:/Sent:/To:/Subject:...) or an attribution line
   // ("On ... wrote:"); used to pull a quote's lead-in into a content-dedup fold.
   var HDR=/^[ \\t>]*(From|Von|De|Da|Van|Fra|Från|Sent|Gesendet|Date|Sendt|Skickat|To|An|Til|Cc|Bcc|Subject|Betreff|Objet|Emne|Ämne|Reply-To|Envoy\\w*|Enviad\\w*)\\b[^\\n]*:/i;
+  var FROMHDR=/^[ \\t>]*(From|Von|De|Da|Van|Fra|Från)\\b[^\\n]*:/i;
   var ATTR=/\\b(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto)\\b|a [eé]crit|^[ \\t>]*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\\b/i;
   contentDedup(root);   // content-based: fold blocks duplicated from earlier messages
   mergeAdjacent(root);   // collapse consecutive folds (any origin) into one toggle
@@ -236,6 +211,9 @@ function foldQuotes(root){
   // between them, even across different containers) into one toggle -- so an
   // attribution fold + its quoted body, or adjacent quote regions, read as one.
   function mergeAdjacent(root){
+    function headerBlock(s){ var n=0, from=false;
+      s.split('\\n').forEach(function(line){ if(HDR.test(line)){ n++; if(FROMHDR.test(line)) from=true; } });
+      return from&&n>=2; }
     var dets=[].slice.call(root.querySelectorAll('details.q'));
     for(var i=1;i<dets.length;i++){
       var a=dets[i-1], b=dets[i];
@@ -259,7 +237,7 @@ function foldQuotes(root){
       var ATTRGAP=/^[>\\s]*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\\b[\\s\\S]*:$|(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto|a [eé]crit)\\s*:$/i;
       var g=gap.replace(/[\\s\\ufeff\\u200b]/g,''), gt=gap.replace(/\\s+/g,' ').trim();
       if(g!=='' && !(gt.length<150 &&
-                     (ATTRGAP.test(gt)||HDR.test(gap)||ORIG.test(gap)))) continue;
+                     (ATTRGAP.test(gt)||headerBlock(gap)||ORIG.test(gap)))) continue;
       a.appendChild(rg.extractContents());       // pull the gap (attribution/ws) into a
       while(b.firstChild){                        // then b's content (minus summary)
         if(b.firstChild.tagName==='SUMMARY'){ b.removeChild(b.firstChild); continue; }
@@ -297,15 +275,8 @@ function foldQuotes(root){
       var d=document.createElement('details'); d.className='q';
       d.appendChild(qsum());
       d.appendChild(rg.extractContents()); rg.insertNode(d);
-      if(visibleLen(body)<3) unwrap(d);   // never fold the WHOLE message (bottom-post)
+      if(visWords(body)<3) unwrap(d);     // never fold the WHOLE message (bottom-post)
     }catch(err){}
-  }
-  // visible (un-folded) text length of a body, ignoring details.q contents.
-  function visibleLen(body){
-    var t=0;(function w(el){[].forEach.call(el.childNodes,function(n){
-      if(n.nodeType===1){ if(n.classList&&n.classList.contains('q')) return; w(n); }
-      else if(n.nodeType===3) t+=n.textContent.replace(/[\\s\\ufeff]/g,'').length; });})(body);
-    return t;
   }
   function unwrap(d){   // undo a fold: move its content (minus summary) back, drop it
     var p=d.parentNode; if(!p) return;
@@ -317,17 +288,23 @@ function foldQuotes(root){
   // every block whose WORD k-grams duplicate text seen in EARLIER messages.
   // Word-shingles (not lines) -> robust to re-wrapping, punctuation and language.
   // Folds inline quotes too (#1); runs back-to-front so offsets stay valid.
+  function normWord(raw){
+    try{return raw.normalize('NFKC').toLowerCase().replace(/[^\\p{L}\\p{N}]+/gu,'');}
+    catch(e){return raw.toLowerCase().replace(/[^a-z0-9]+/g,'');}
+  }
   function toks(text){   // normalized words with their raw text offsets
     var re=/\\S+/g, m, o=[];
-    while((m=re.exec(text))){ var raw=m[0], w=raw.toLowerCase().replace(/[^a-z0-9]+/g,'');
+    while((m=re.exec(text))){ var raw=m[0], w=normWord(raw);
       if(!w) continue;
       // Trim leading/trailing punctuation from the OFFSETS, not just from the
       // normalized word: adjacent block elements yield no separating space in
       // textContent, so an attribution "ecrit :" can glue to the quote start as a
       // single token ":Just". Folding from the raw start would split the ":" into
       // the quote fold (it ends up on its own line under the toggle). Fold the WORD.
-      var lead=raw.search(/[a-z0-9]/i); if(lead<0) lead=0;
-      var trail=raw.length-1; while(trail>lead && !/[a-z0-9]/i.test(raw[trail])) trail--;
+      var lead=raw.search(/[\\p{L}\\p{N}]/u); if(lead<0) lead=raw.search(/[a-z0-9]/i);
+      if(lead<0) lead=0;
+      var trail=raw.length-1;
+      while(trail>lead && normWord(raw[trail])==='') trail--;
       o.push({w:w, off:m.index+lead, end:m.index+trail+1}); }
     return o;
   }
@@ -340,24 +317,29 @@ function foldQuotes(root){
   // time -- so a text node is never split (no dangling ">-"/"word," fragments).
   function lineSpans(body){
     var spans=[], start=0, pos=0, text='';
-    function brk(){ spans.push({start:start, end:pos, text:text}); start=pos; text=''; }
-    (function w(el){ [].forEach.call(el.childNodes,function(n){
-      if(n.nodeType===3){ text+=n.textContent; pos+=n.textContent.length; }
+    function brk(skip){ spans.push({start:start, end:pos, text:text});
+      pos+=skip||0; start=pos; text=''; }
+    function add(s,inPre){ if(!inPre){ text+=s; pos+=s.length; return; }
+      var p=s.split('\\n'); for(var i=0;i<p.length;i++){ text+=p[i]; pos+=p[i].length;
+        if(i<p.length-1) brk(1); } }
+    (function w(el,inPre){ [].forEach.call(el.childNodes,function(n){
+      if(n.nodeType===3){ add(n.textContent,inPre); }
       else if(n.nodeType===1){
-        if(n.tagName==='BR'){ brk(); }
-        else if(/^(P|DIV|LI|BLOCKQUOTE|TR|PRE|H[1-6]|UL|OL|TABLE|DETAILS)$/.test(n.tagName)){ brk(); w(n); brk(); }
-        else w(n);
+        if(n.tagName==='BR'){ brk(0); }
+        else if(/^(P|DIV|LI|BLOCKQUOTE|TR|PRE|H[1-6]|UL|OL|TABLE|DETAILS)$/.test(n.tagName)){
+          brk(0); w(n,inPre||n.tagName==='PRE'); brk(0); }
+        else w(n,inPre);
       }
-    }); })(body);
-    brk();
+    }); })(body,false);
+    brk(0);
     return spans;
   }
-  // Content-dedup, LINE-granular and robust: score each logical line by the
-  // fraction of its words duplicated from EARLIER messages, then fold maximal runs
-  // of quoted lines that form a real BLOCK -- >=2 lines, a trailing (bottom) quote,
-  // or a run led by an attribution ("X wrote:"). A lone duplicated line wedged
-  // between the author's own lines is inline context (a quote being replied to) and
-  // is left visible. Folds whole lines only, so a text node is never split.
+  // Content-dedup, LINE-granular and conservative: a logical line is foldable
+  // only when EVERY normalized word duplicates EARLIER messages. Fold maximal
+  // exact runs that form a real BLOCK -- >=2 lines, a trailing (bottom) quote,
+  // or a run led by an attribution ("X wrote:"). Any changed or uncovered word
+  // keeps its whole line visible. Folds whole lines only, so a text node is
+  // never split.
   function contentDedup(root){
     var bodies=root.querySelectorAll('.tmsg .pt,.tmsg .md');
     if(!bodies.length) bodies=root.querySelectorAll('.pt,.md');
@@ -373,8 +355,8 @@ function foldQuotes(root){
         var li=0;                                   // map each word to its line
         for(i=0;i<t.length;i++){ while(li<nL-1 && t[i].off>=spans[li].end) li++;
           nw[li]++; if(cov[i]) nc[li]++; }
-        var quoted=[];                              // line is MOSTLY duplicated
-        for(i=0;i<nL;i++) quoted[i]= nw[i]>=4 && nc[i]/nw[i]>=0.8;
+        var quoted=[];                              // every word is duplicated
+        for(i=0;i<nL;i++) quoted[i]=nw[i]>0 && nc[i]===nw[i];
         var runs=[]; i=0;                           // maximal runs of quoted lines
         while(i<nL){
           if(!quoted[i]){ i++; continue; }
@@ -986,7 +968,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "19-attr-shape"
+RENDER_VERSION = "20-exact-folds"
 
 
 _CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')

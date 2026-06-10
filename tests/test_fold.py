@@ -163,17 +163,14 @@ def test_deep_quoted_mailman3_footer_dropped():
 
 
 def test_inline_answers_inside_long_quote_stay_visible():
-    """THE swallow bug: short inline answers inside a long quote pass the 85%
-    tail-coverage ratio (they are under the 15% noise allowance), so the fold
-    ate them. An uncovered non-furniture line of >=4 words is FOREIGN prose
-    now -- the fold must end before it. Real case: Gary Baluha replying
-    point-by-point inside Ralph Mitchell's quoted list (thread 298c6f0e0954);
-    his answers were folded to a hollow message."""
+    """Inline answers split exact-covered quote runs instead of being hidden.
+    Real case: Gary Baluha replying point-by-point inside Ralph Mitchell's
+    quoted list (thread 298c6f0e0954)."""
     vis, ftxt = _last_msg_views("fold_inline_reply_thread.json")
     assert "I think my new method would handle that" in vis   # inline answer 1
     assert "2-5: Wow..." in vis                                # inline answer 2
     assert "really weird websites out there" in vis            # closing remark
-    assert len(vis.split()) >= 30
+    assert len(vis.split()) >= 20
 
 
 def test_foreign_prose_is_per_line_not_ratio():
@@ -225,3 +222,103 @@ def test_inline_reply_not_swallowed():
              "my answer: jumbo frames help a lot in this case</pre></div>")
     out = fold_thread([parent, child], ["p", "c"])
     assert "<details" not in out[1]
+
+
+def _five_line_parent():
+    return [
+        " ".join(f"a{i}_{j}" for j in range(12))
+        for i in range(5)
+    ]
+
+
+def test_short_inline_answers_split_quote_runs():
+    """One-to-three-word replies are content, not tolerable quote noise."""
+    lines = _five_line_parent()
+    parent = f"<div class=pt><pre>{chr(10).join(lines)}</pre></div>"
+    for answer in ("Yes.", "No.", "Sorry - no.", "Looks correct, applied."):
+        child = (
+            "<div class=pt><pre>My own introduction stays visible.\n"
+            f"{lines[0]}\n{lines[1]}\n{answer}\n"
+            f"{lines[3]}\n{lines[4]}</pre></div>"
+        )
+        out = fold_thread([parent, child], ["p", "c"])[1]
+        assert answer in _visible(out)
+        assert len(_folds(out)) == 2
+
+
+def test_changed_token_in_copied_text_stays_visible():
+    """Similarity is not quotation proof: one changed token keeps its line out."""
+    lines = _five_line_parent()
+    changed = lines[2].replace("a2_6", "DISABLE_PRODUCTION_MODE")
+    parent = f"<div class=pt><pre>{chr(10).join(lines)}</pre></div>"
+    child = (
+        "<div class=pt><pre>My correction stays visible here.\n"
+        f"{lines[0]}\n{lines[1]}\n{changed}\n"
+        f"{lines[3]}\n{lines[4]}</pre></div>"
+    )
+    out = fold_thread([parent, child], ["p", "c"])[1]
+    assert "DISABLE_PRODUCTION_MODE" in _visible(out)
+    assert len(_folds(out)) == 2
+
+
+def test_generic_colon_and_url_lines_are_not_quote_furniture():
+    """Only explicit mail furniture may be swept into an adjacent quote."""
+    lines = _five_line_parent()
+    parent = f"<div class=pt><pre>{chr(10).join(lines)}</pre></div>"
+    prose = (
+        "Warning: do not deploy this version yet",
+        "Subject: use the staging configuration here",
+        "See https://example.com before you deploy this",
+    )
+    child = (
+        "<div class=pt><pre>My own introduction stays visible.\n"
+        f"{lines[0]}\n{lines[1]}\n{chr(10).join(prose)}\n"
+        f"{lines[3]}\n{lines[4]}</pre></div>"
+    )
+    out = fold_thread([parent, child], ["p", "c"])[1]
+    vis = _visible(out)
+    assert all(line in vis for line in prose)
+    assert len(_folds(out)) == 2
+
+
+def test_provenance_prefers_latest_dominant_source():
+    common = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+    extra = " ".join(f"parent{i}" for i in range(20))
+    bodies = [
+        f"<div class=pt><pre>{common}</pre></div>",
+        f"<div class=pt><pre>{common} {extra}</pre></div>",
+        f"<div class=pt><pre>My reply stays visible here.\n{common} {extra}</pre></div>",
+    ]
+    out = fold_thread(bodies, ["root author", "actual parent", "child"])[2]
+    label = _folds(out)[0].findtext('.//span[@class="meta"]')
+    assert label and "actual parent" in label
+
+
+def test_fold_can_start_at_direct_body_text_offset_zero():
+    """HTML replies can put the quote in ``body.text`` before child blocks."""
+    quote = (
+        "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu"
+        "<br>nu xi omicron pi rho sigma tau upsilon phi chi psi omega"
+    )
+    parent = f"<div class=md>{quote}</div>"
+    child = (
+        f"<div class=md>{quote}"
+        "<p>My own response remains visible here.</p></div>"
+    )
+    out = fold_thread([parent, child], ["parent", "child"])[1]
+    assert len(_folds(out)) == 1
+    assert "My own response remains visible" in _visible(out)
+
+
+def test_unicode_words_participate_in_quote_proof():
+    quote = (
+        "привет мир это длинная цитата сообщения для проверки точного "
+        "сопоставления слов в обсуждении сегодня снова"
+    )
+    bodies = [
+        f"<div class=pt><pre>{quote}</pre></div>",
+        f"<div class=pt><pre>Мой ответ остается видимым здесь.\n{quote}</pre></div>",
+    ]
+    out = fold_thread(bodies, ["parent", "child"])[1]
+    assert len(_folds(out)) == 1
+    assert "Мой ответ остается видимым" in _visible(out)

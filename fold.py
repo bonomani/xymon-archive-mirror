@@ -5,22 +5,20 @@ A reply on this list usually carries a full copy of the message it answers
 quotes from markers or client-specific markup, each message is matched against
 everything said earlier in its own thread:
 
-  1. lines whose words are mostly covered by earlier-message 6-word shingles
-     are quote candidates;
-  2. the EARLIEST candidate that starts a validated tail (>=85% of all words
-     from there to the end covered by earlier text) is the cut point;
-  3. the cut sweeps upward over "furniture" lines (Outlook From:/Von: header
-     fields, "X wrote:" attributions, mail-gateway banners, separators) that
-     belong to the quote but are not themselves quoted text;
-  4. everything from the swept cut to the end is wrapped in ONE
-     <details class=q> whose summary names the quoted author (provenance =
-     whichever earlier message contributed the matched text -- no reliance on
-     In-Reply-To, which is missing/mangled in decades-old mail).
+  1. words covered by earlier-message 6-word shingles are quote evidence;
+  2. a foldable line must have EVERY normalized word covered, or be an
+     explicitly recognized quote-furniture line (Outlook headers, an
+     attribution, a separator, or a known external-mail banner);
+  3. maximal safe runs with enough duplicated text become independent folds,
+     so an inline answer splits the quote instead of being hidden inside it;
+  4. each <details class=q> names the earlier author who contributed most of
+     its matched text -- no reliance on In-Reply-To, which is missing/mangled
+     in decades-old mail.
 
-Validation is the safety: a low-coverage tail (an inline replier's answers, an
-off-list forward, pasted headers) gets NO fold here -- the client script's
-conservative per-run dedup remains as the fallback layer. The failure
-direction is always under-folding; new text can never be hidden by this pass.
+Validation is deliberately one-sided: any uncovered prose token keeps its
+whole logical line visible. This costs some folds when a mailer has genuinely
+edited a quote, but a one-word answer or correction can never be treated as
+acceptable "noise" inside a long duplicate.
 
 Operates on the RENDERED body HTML (the exact text a reader sees), so plain
 and HTML mail take the same path and offsets cannot drift from the page.
@@ -44,22 +42,10 @@ except ImportError:                                   # pragma: no cover
 
 K = 6                     # word-shingle size (matches the client script)
 _MIN_LINE_WORDS = 4       # a shorter line can't prove it is quoted by itself
-_LINE_COVER = 0.8         # fraction of a line's words covered -> quote candidate
-_TAIL_COVER = 0.85        # fraction of cut..end words covered -> fold validated
 _MIN_TAIL_COVERED = 12    # too little duplicated text is not worth a fold
 _MIN_VISIBLE_WORDS = 3    # never fold a message down to less than this
-_MAX_UNCOVERED_RUN = 12   # consecutive uncovered prose words allowed in a fold:
-                          # the tail-coverage RATIO tolerates 15% noise, which is
-                          # exactly the size of a short inline answer inside a
-                          # long quote -- an absolute run cap catches what the
-                          # ratio forgives (furniture lines stay exempt: banners,
-                          # header fields and attributions are uncovered too)
-_MAX_CANDIDATES = 20      # cut candidates tried before giving up
-_MAX_SWEEP = 12           # non-blank furniture lines the cut may climb over
-_MAX_SWEEP_TOTAL = 60     # hard cap including blanks (runaway guard)
 
 _WORD = re.compile(r"\S+")
-_NORM = re.compile(r"[^a-z0-9]+")
 # C0 control characters (minus \t \n \r): illegal in XML, so lxml refuses to
 # re-serialize text containing them -- a NUL pasted into a 2003 mail made the
 # whole message silently render unfolded. Replace each with a SPACE before
@@ -68,24 +54,32 @@ _NORM = re.compile(r"[^a-z0-9]+")
 # match against the clean copy in the parent message).
 _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
-# Furniture between the author's text and the quoted copy: header fields
-# (From:/Von:/Gesendet:/Betreff: ...), attributions ("On ... wrote:"),
-# separators, gateway banners (they carry the sender's address or a URL),
-# and bare quote markers. Only consulted in the bounded sweep zone directly
-# above a VALIDATED quote tail, so breadth here cannot hide a free-standing
-# reply.
-_FURNITURE = re.compile(
-    r"^\s*$"
-    r"|^\s*>"
-    # Field: value -- the key needs at least one LETTER: an inline reply like
-    # "1: I think that would work" is prose, not a header field.
-    r"|^\s*(?=[\w-]*[^\W\d_])[\wÀ-ÿ-]{1,15}\s*:\s"
-    r"|^\s*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\b"    # attribution opener
-    r"|(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto|a [eé]crit)\s*:?\s*$"
-    r"|^\s*[-_*=]{2,}\s*(\S.*)?$"                     # separator / Original Message
-    r"|@"                                             # any line carrying an address
-    r"|https?://",                                    # any line carrying a URL
+# Quote furniture is intentionally an allowlist. Generic ``Key: value``
+# lines, addresses and URLs are prose: "Warning: do not deploy" and "See
+# https://..." must stay visible even immediately above a proven quote.
+_HEADER = re.compile(
+    r"^\s*(From|Von|De|Da|Van|Fra|Från"
+    r"|Sent|Gesendet|Date|Envoy[eé]e?|Enviad[oa]|Inviat[oa]"
+    r"|Verzonden|Sendt|Skickat"
+    r"|To|An|Aan|Til|À|Cc|Bcc"
+    r"|Subject|Betreff|Objet|Asunto|Oggetto|Onderwerp|Assunto|Emne|Ämne"
+    r"|Reply-To)\s*:\s+\S", re.I)
+_ATTRIBUTION = re.compile(
+    r"^\s*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\b.*"
+    r"(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto|a [eé]crit)\s*:?\s*$",
     re.I)
+_SEPARATOR = re.compile(
+    r"^\s*[-_*=]{2,}\s*(Original Message|Ursprüngliche Nachricht"
+    r"|Message d'origine|Mensaje original|Messaggio originale"
+    r"|Oorspronkelijk bericht|Oprindelig meddelelse"
+    r"|Ursprungligt meddelande|Opprinnelig melding)?\s*[-_*=]*\s*$",
+    re.I)
+_GATEWAY = re.compile(
+    r"^\s*(WARNUNG:\s*Diese E-?Mail kam von außerhalb der Organisation"
+    r"|CAUTION:\s*This (email|message) originated from outside"
+    r"|WARNING:\s*This (email|message) (came|originated) from outside"
+    r"|\[?EXTERNAL (EMAIL|MESSAGE)\]?)\b", re.I)
+_BARE_QUOTE = re.compile(r"^\s*>+\s*$")
 
 _BLOCKS = frozenset(
     "p div li blockquote tr pre h1 h2 h3 h4 h5 h6 ul ol table details".split())
@@ -100,10 +94,47 @@ def _norm_words(text):
     markers vanish, so '>'-wrapped and reflowed copies still align."""
     out = []
     for m in _WORD.finditer(text or ""):
-        w = _NORM.sub("", m.group(0).lower())
+        w = _norm_word(m.group(0))
         if w:
             out.append(w)
     return out
+
+
+def _norm_word(raw):
+    """Unicode-aware alphanumeric token normalization."""
+    return "".join(c for c in raw.casefold() if c.isalnum())
+
+
+def _is_furniture(text):
+    return bool(_ATTRIBUTION.search(text)
+                or _SEPARATOR.search(text) or _GATEWAY.search(text)
+                or _BARE_QUOTE.search(text))
+
+
+def _header_furniture(lines):
+    """Mark only real multi-field mail-header blocks, not lone prose such as
+    ``Subject: use the staging configuration``."""
+    marks = [False] * len(lines)
+    matches = [_HEADER.search(text) for _, _, text in lines]
+    i = 0
+    while i < len(lines):
+        if matches[i] is None:
+            i += 1
+            continue
+        start = i
+        while (i + 1 < len(lines)
+               and (matches[i + 1] is not None
+                    or not lines[i + 1][2].strip())):
+            i += 1
+        names = [matches[j].group(1).casefold() for j in range(start, i + 1)
+                 if matches[j] is not None]
+        if len(names) >= 2 and any(
+                name in {"from", "von", "de", "da", "van", "fra", "från"}
+                for name in names):
+            for j in range(start, i + 1):
+                marks[j] = True
+        i += 1
+    return marks
 
 
 # --- rendered-HTML text model -------------------------------------------------
@@ -177,16 +208,19 @@ def _lines(full):
 # --- the cut decision -----------------------------------------------------------
 
 def _plan(full, prior):
-    """Decide the fold for one message: (cut_offset, end_offset|None, src_index)
-    or None. ``prior`` maps shingle -> index of the earliest message that said
-    it. ``end_offset`` is None for a fold reaching the end of the message; a
-    bounded fold stops at the last quoted line, leaving an uncovered suffix
-    (corporate disclaimer, or a genuine bottom-posted reply) visible."""
+    """Return non-overlapping ``(cut, end|None, src_index)`` fold plans.
+
+    ``prior`` maps each shingle to the latest earlier message that said it.
+    A line enters a plan only when every normalized word is covered, or the
+    line is explicit quote furniture. Uncovered prose therefore splits runs
+    and remains visible, even when it is only one word or one changed token
+    inside an otherwise copied paragraph.
+    """
     lines = _lines(full)
     toks = []                                   # (norm_word, line_index)
     li = 0
     for m in _WORD.finditer(full):
-        w = _NORM.sub("", m.group(0).lower())
+        w = _norm_word(m.group(0))
         if not w:
             continue
         while li < len(lines) - 1 and m.start() > lines[li][1]:
@@ -209,73 +243,66 @@ def _plan(full, prior):
         if cov[i] is not None:
             nc[l] += 1
 
-    last_cov = max((i for i in range(len(lines)) if nc[i]), default=-1)
-    furn = [bool(_FURNITURE.search(t)) for _, _, t in lines]
-    # FOREIGN prose: an (almost) uncovered non-furniture line with enough
-    # words to be a sentence -- an inline answer, a bottom-posted reply. It
-    # must NEVER end up inside a fold (the tail-coverage RATIO would tolerate
-    # it: a short answer inside a long quote is well under the 15% noise
-    # allowance). The bar is <25%: every observed real answer scored 0%,
-    # while quote lines mangled by rewrapping keep partial coverage -- at
-    # <50% the rule blocked legitimate folds over re-wrapped quotes.
-    foreign = [nw[i] >= _MIN_LINE_WORDS and not furn[i]
-               and nc[i] / nw[i] < 0.25 for i in range(len(lines))]
-    candidates = [i for i in range(len(lines))
-                  if nw[i] >= _MIN_LINE_WORDS and nc[i] / nw[i] >= _LINE_COVER]
-    for ci in candidates[:_MAX_CANDIDATES]:
-        # ends to try, in order: the full tail; the last quoted line (an
-        # uncovered SUFFIX -- disclaimer or bottom-posted text -- then stays
-        # visible); just before the first foreign line (an inline answer
-        # splits the quote -- fold only the chunk above it).
-        first_foreign = next((i for i in range(ci, len(lines)) if foreign[i]),
-                             None)
-        ends = [len(lines) - 1, last_cov]
-        if first_foreign is not None:
-            ends.append(first_foreign - 1)
-        for end_line in ends:
-            if end_line < ci:
-                continue
-            if any(foreign[i] for i in range(ci, end_line + 1)):
-                continue                         # a reply inside -> never fold
-            region = [i for i, t in enumerate(toks) if ci <= t[1] <= end_line]
-            if not region:
-                continue
-            covered = sum(1 for i in region if cov[i] is not None)
-            if (covered < _MIN_TAIL_COVERED
-                    or covered / len(region) < _TAIL_COVER):
-                continue
-            # belt-and-braces: also cap CONSECUTIVE uncovered prose words, so
-            # several short uncovered lines (each under the foreign-line bar)
-            # cannot add up to a hidden reply.
-            run = worst = 0
-            for i in region:
-                if cov[i] is None and not furn[toks[i][1]]:
-                    run += 1
-                    worst = max(worst, run)
-                else:
-                    run = 0
-            if worst > _MAX_UNCOVERED_RUN:
-                continue
-            cut_line = ci                       # climb over quote furniture
-            swept = 0                           # blanks free; real lines capped
-            for _ in range(_MAX_SWEEP_TOTAL):
-                if cut_line == 0 or swept >= _MAX_SWEEP:
-                    break
-                above = lines[cut_line - 1][2]
-                if not _FURNITURE.search(above):
-                    break
-                if above.strip():
-                    swept += 1
+    blank = [not text.strip() for _, _, text in lines]
+    header_furn = _header_furniture(lines)
+    furn = [header_furn[i] or _is_furniture(text)
+            for i, (_, _, text) in enumerate(lines)]
+    exact = [nw[i] > 0 and nc[i] == nw[i] for i in range(len(lines))]
+    safe = [blank[i] or furn[i] or exact[i] for i in range(len(lines))]
+
+    planned = []
+    i = 0
+    while i < len(lines):
+        if not safe[i]:
+            i += 1
+            continue
+        start = i
+        while i + 1 < len(lines) and safe[i + 1]:
+            i += 1
+        stop = i
+
+        evidence = [j for j in range(start, stop + 1) if exact[j]]
+        covered = sum(nc[j] for j in range(start, stop + 1))
+        if evidence and covered >= _MIN_TAIL_COVERED:
+            first, last = evidence[0], evidence[-1]
+            # Keep only quote-adjacent blank/furniture/covered lines. This
+            # trims parser-generated empty lines at the message boundaries.
+            cut_line = first
+            while cut_line > start and safe[cut_line - 1]:
                 cut_line -= 1
-            if sum(nw[i] for i in range(cut_line)) < _MIN_VISIBLE_WORDS:
-                continue                         # would hollow the message out
-                                                 # -> a deeper candidate may fit
-            src = next((cov[i] for i in region if cov[i] is not None), None)
-            end = (None if end_line >= len(lines) - 1
-                   or all(nw[i] == 0 for i in range(end_line + 1, len(lines)))
-                   else lines[end_line][1])
-            return lines[cut_line][0], end, src
-    return None
+            end_line = last
+            while end_line < stop and safe[end_line + 1]:
+                end_line += 1
+
+            covered_lines = sum(1 for j in range(cut_line, end_line + 1)
+                                if exact[j] and nw[j])
+            led = any(furn[j] for j in range(cut_line, first))
+            trailing = all(blank[j] for j in range(end_line + 1, len(lines)))
+            strong_line = any(nw[j] >= _MIN_LINE_WORDS
+                              for j in range(cut_line, end_line + 1)
+                              if exact[j])
+            if ((covered_lines >= 2 or led or trailing)
+                    and (strong_line or covered_lines >= 2)):
+                sources = {}
+                for ti, (_, line_index) in enumerate(toks):
+                    if cut_line <= line_index <= end_line and cov[ti] is not None:
+                        sources[cov[ti]] = sources.get(cov[ti], 0) + 1
+                src = max(sources, key=sources.get) if sources else None
+                planned.append((cut_line, end_line, src))
+        i += 1
+
+    hidden_lines = {j for start, stop, _ in planned
+                    for j in range(start, stop + 1)}
+    if sum(nw[j] for j in range(len(lines)) if j not in hidden_lines) \
+            < _MIN_VISIBLE_WORDS:
+        return []
+    return [
+        (lines[start][0],
+         None if all(blank[j] for j in range(stop + 1, len(lines)))
+         else lines[stop][1],
+         src)
+        for start, stop, src in planned
+    ]
 
 
 # --- DOM surgery ------------------------------------------------------------------
@@ -311,10 +338,10 @@ def _materialize(body, segs, off):
         return None
     if off > seg.start:
         node = _split_seg(seg, off - seg.start)
-    elif seg.attr == "text":
+    elif seg.attr == "text" and seg.el is not body:
         node = seg.el                            # boundary at element start
     else:
-        node = _split_seg(seg, 0)                # tail text -> own node
+        node = _split_seg(seg, 0)                # tail/root text -> own node
 
     cur = node
     while True:
@@ -379,8 +406,8 @@ def _fold_range(body, segs, cut, end, who):
 def fold_thread(bodies, authors):
     """``bodies``: rendered body-HTML strings of one thread, chronological.
     ``authors``: display name per message (provenance labels). Returns the
-    list with each validated quote tail wrapped in <details class=q>; a
-    message with no provable tail is returned unchanged."""
+    list with each validated exact quote run wrapped in <details class=q>; a
+    message with no provable run is returned unchanged."""
     if lhtml is None:                          # no lxml -> no server-side folds
         return list(bodies)
     out = []
@@ -396,14 +423,14 @@ def fold_thread(bodies, authors):
                                and not (root.text or "").strip()) else root
             full, segs = _walk(body)
             if prior:
-                plan = _plan(full, prior)
-                if plan is not None:
-                    cut, end, src = plan
+                plans = _plan(full, prior)
+                for cut, end, src in reversed(plans):
                     who = (authors[src]
                            if src is not None and 0 <= src < mi else None)
-                    if _fold_range(body, segs, cut, end, who):
-                        ser = lhtml.tostring(root, encoding="unicode")
-                        folded = re.sub(r"^<x-fold>|</x-fold>$", "", ser)
+                    _fold_range(body, segs, cut, end, who)
+                if plans:
+                    ser = lhtml.tostring(root, encoding="unicode")
+                    folded = re.sub(r"^<x-fold>|</x-fold>$", "", ser)
         except Exception as exc:                  # any surprise -> render as-is,
             folded = raw                          # but never silently: an audit
             full = None                           # found 11 messages lost here.
@@ -415,5 +442,5 @@ def fold_thread(bodies, authors):
         ws = _norm_words(full) if full is not None else _norm_words(
             re.sub(r"<[^>]+>", " ", raw or ""))
         for j in range(len(ws) - K + 1):
-            prior.setdefault(" ".join(ws[j:j + K]), mi)
+            prior[" ".join(ws[j:j + K])] = mi
     return out

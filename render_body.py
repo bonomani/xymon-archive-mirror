@@ -75,9 +75,6 @@ _UNSUB = re.compile(
 # all occurrences (plain or HTML, quoted or not, full or 2-line) -- it is list-
 # injected boilerplate, never message content. Lines may be wrapped/quoted with
 # arbitrary markup, so the gaps tolerate interleaved tags and quote markers.
-# Separators between footer lines: interleaved markup, whitespace and quote
-# markers (">", "&gt;"), but no prose letters -- so the match stops at content.
-_FSEP = r"(?:</?[a-z][a-z0-9]*[^>]*>|[\s>]|&nbsp;|&gt;)*"
 # A footer line is an address (@ or pipermail "<name> at <domain>"), a listinfo
 # URL, or an unsubscribe instruction.
 _FADDR = (r"(?:<a\b[^>]*>[^<]*</a>|[^\s<]+@[^\s<]+|"
@@ -89,12 +86,11 @@ _FLINE = r"(?:" + _FADDR + r"|" + _FURL + r"|To unsubscribe[^<\n]*)"
 # A list footer: a rule line (underscores/dashes/<hr>), the "<name> mailing
 # list" header, then any run of footer lines (address / listinfo URL /
 # unsubscribe), in old or new Mailman form.
-_LIST_FOOTER = re.compile(
-    r"(?:[_-]{5,}|<hr\s*/?>)" + _FSEP +
-    r"(?:Xymon|Hobbit) mailing list\b[^<\n]*"
-    r"(?:" + _FSEP + _FLINE + r")*"
-    r"(?:</?[a-z][^>]*>)*",
-    re.I)
+_FOOTER_RULE = re.compile(r"(?:[_-]{5,}|<hr\s*/?>)", re.I)
+_FSEP_TOKEN = re.compile(
+    r"</?[a-z][a-z0-9]*[^>]*>|[\s>]|&nbsp;|&gt;", re.I)
+_LIST_NAME = re.compile(r"(?:Xymon|Hobbit) mailing list\b[^<\n]*", re.I)
+_FOOTER_LINE = re.compile(_FLINE, re.I)
 # Any leftover listinfo URL line (quoted footers whose header was already cut,
 # including the mangled "Xymon mailing <addr>://.../listinfo/..." remnant).
 _LISTINFO_LINE = re.compile(
@@ -118,7 +114,7 @@ _EMPTY_WRAP = re.compile(
 
 
 def strip_list_footers(s: str) -> str:
-    s = _LIST_FOOTER.sub("", s or "")
+    s = _strip_list_footer_blocks(s or "")
     s = _UNSUB_LINE.sub("", s)
     s = _LISTINFO_LINE.sub("", s)
     for _ in range(4):                 # collapse wrappers the strip emptied
@@ -127,6 +123,48 @@ def strip_list_footers(s: str) -> str:
             break
         s = new
     return s
+
+
+def _strip_list_footer_blocks(s: str) -> str:
+    """Linear scanner for inline/quoted Mailman footer blocks.
+
+    The former nested regex could backtrack for minutes when a valid footer
+    was followed by a long HTML disclaimer. Tokens between footer lines have
+    disjoint, anchored matches here, so each input character is considered a
+    bounded number of times.
+    """
+    out = []
+    copied = search = 0
+    while True:
+        rule = _FOOTER_RULE.search(s, search)
+        if rule is None:
+            out.append(s[copied:])
+            return "".join(out)
+        pos = rule.end()
+        while True:
+            sep = _FSEP_TOKEN.match(s, pos)
+            if sep is None:
+                break
+            pos = sep.end()
+        header = _LIST_NAME.match(s, pos)
+        if header is None:
+            search = rule.end()
+            continue
+
+        end = header.end()
+        while True:
+            pos = end
+            while True:
+                sep = _FSEP_TOKEN.match(s, pos)
+                if sep is None:
+                    break
+                pos = sep.end()
+            line = _FOOTER_LINE.match(s, pos)
+            if line is None:
+                break
+            end = line.end()
+        out.append(s[copied:rule.start()])
+        copied = search = end
 
 
 # AVG / anti-virus scanner footers appended to 2000s-era mail ("No virus found
