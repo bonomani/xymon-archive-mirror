@@ -179,13 +179,16 @@ _FOOTNOTE = re.compile(r"\s*\[\d+\]\s*$")
 _FOOTER_LINE = re.compile(
     r"(?:"
     r"[_-]{5,}"                                       # rule line
-    r"|(?:Xymon|Hobbit)\s+mailing\s+list"            # list-name header
+    r"|(?:Xymon|Hobbit)\s+mailing\s+list(?:\s*--.*)?"  # header, incl. M3 "-- addr"
     r"|(?:mailto:)?(?:Xymon|Hobbit)[\w.-]*\s+at\s+[\w.-]+\.\w+"  # "x at dom"
     r"|(?:mailto:)?(?:xymon|hobbit)[\w.+-]*@[\w.-]+"  # x@dom list address
+    r"|To unsubscribe send an e-?mail to\b.*"         # M3 instruction (any wrap)
+    r"|[\w-]*leave@[\w.-]*(?:xymon|hobbit)[\w.-]*\b.*"  # wrapped leave@ remnant
+    r"|(?:<mailto:[^>\s]*>*\s*)+"                     # mailto-link debris line
     r"|\S*/listinfo/\S*"                              # listinfo URL
     r"|\[\d+\]\s*mailto:(?:Xymon|Hobbit)[\w.-]*\s+at\s+[\w.-]+\.\w+"  # [n] def
     r"|\[\d+\]\s*\S*/listinfo/\S*"                    # [n] listinfo def
-    r")\s*$",
+    r")(?:\s*<mailto:[^>\s]*>*)*\s*$",                # trailing mailto junk
     re.I)
 
 

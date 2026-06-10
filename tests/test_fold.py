@@ -103,6 +103,65 @@ def test_unfoldable_input_passes_through():
     assert out == bodies                   # nothing duplicated -> unchanged
 
 
+def _last_msg_views(fixture):
+    """Fold a fixture thread; return (visible_text, folded_text) of its
+    last message."""
+    msgs = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures",
+                                       fixture)))
+    bodies = [body_to_html(m["body"], m["body_html"]) for m in msgs]
+    folded = fold_thread(bodies, [m["from_name"] for m in msgs])
+    root = lhtml.fromstring(f"<div>{folded[-1]}</div>")
+    ftxt = " ".join(re.sub(r"\s+", " ", d.text_content())
+                    for d in root.findall(".//details"))
+    return _visible(folded[-1]), ftxt
+
+
+def test_bounded_fold_spares_trailing_disclaimer():
+    """A top-post whose tail ends with an UNCOVERED corporate disclaimer:
+    the fold must stop at the last quoted line (bounded), folding the quote
+    (incl. its short table lines) while the author's words and the trailing
+    disclaimer stay visible. Real case: Scot Kreienkamp, thread 73be15218202."""
+    vis, ftxt = _last_msg_views("fold_disclaimer_thread.json")
+    assert "Excellent progress" in vis                       # author's reply
+    assert "This message is intended only for" in vis        # trailing disclaimer
+    assert "Alpine: 3.19/3.20" not in vis                    # quoted build matrix
+    assert "Alpine: 3.19/3.20" in ftxt
+    assert "PCRE2" not in vis                                # quoted prose
+
+
+def test_hollow_guard_tries_next_candidate():
+    """A falsely-covered line near the top must not abort folding: the guard
+    skips to the NEXT candidate instead of giving up, so the real quote folds
+    and the author's new text (incl. fresh command output) stays visible.
+    Real case: Becker Christian, thread d264e9e12ab2."""
+    vis, ftxt = _last_msg_views("fold_uptime_thread.json")
+    assert "The output of uptime is" in vis                  # author's new text
+    assert "13:02:45 up 23:03" in vis                        # fresh uptime output
+    assert "WARNUNG" not in vis                              # quoted banner
+    assert "LC_NUMERIC=de_DE" not in vis                     # quoted locale dump
+    assert "LC_NUMERIC=de_DE" in ftxt
+
+
+def test_deep_quoted_mailman3_footer_dropped():
+    """Wrapped, mailto-mangled Mailman 3 footer lines inside deep quotes are
+    boilerplate, never content -- the per-line filter must drop every form."""
+    from render_body import _is_footer_line
+    for line in (
+        ">     To unsubscribe send an email to xymon-leave@xymon.com <mailto:xymon-",
+        "> >      > leave@xymon.com <mailto:leave@xymon.com>>",
+        "> Xymon mailing list -- xymon@xymon.com<mailto:xymon@xymon.com>",
+        ">     <mailto:xymon@xymon.com>>",
+        "To unsubscribe send an email to xymon-leave@xymon.com<mailto:xymon-leave@xymon.com>",
+    ):
+        assert _is_footer_line(line), line
+    for line in (                            # real content must survive
+        "Please leave a comment on the PR if you disagree.",
+        "send an email to me directly instead",
+        "mailto links in the docs are broken",
+    ):
+        assert not _is_footer_line(line), line
+
+
 def test_inline_reply_not_swallowed():
     """A reply interleaving NEW answers between quoted blocks fails tail
     validation -> no server fold (the conservative client path handles it)."""

@@ -158,8 +158,11 @@ def _lines(full):
 # --- the cut decision -----------------------------------------------------------
 
 def _plan(full, prior):
-    """Decide the fold for one message: (cut_offset, src_index) or None.
-    ``prior`` maps shingle -> index of the earliest message that said it."""
+    """Decide the fold for one message: (cut_offset, end_offset|None, src_index)
+    or None. ``prior`` maps shingle -> index of the earliest message that said
+    it. ``end_offset`` is None for a fold reaching the end of the message; a
+    bounded fold stops at the last quoted line, leaving an uncovered suffix
+    (corporate disclaimer, or a genuine bottom-posted reply) visible."""
     lines = _lines(full)
     toks = []                                   # (norm_word, line_index)
     li = 0
@@ -187,28 +190,42 @@ def _plan(full, prior):
         if cov[i] is not None:
             nc[l] += 1
 
+    last_cov = max((i for i in range(len(lines)) if nc[i]), default=-1)
     candidates = [i for i in range(len(lines))
                   if nw[i] >= _MIN_LINE_WORDS and nc[i] / nw[i] >= _LINE_COVER]
     for ci in candidates[:_MAX_CANDIDATES]:
-        tail = [i for i, t in enumerate(toks) if t[1] >= ci]
-        covered = sum(1 for i in tail if cov[i] is not None)
-        if covered < _MIN_TAIL_COVERED or covered / len(tail) < _TAIL_COVER:
-            continue
-        cut_line = ci                           # climb over quote furniture
-        swept = 0                               # blanks are free; real lines capped
-        for _ in range(_MAX_SWEEP_TOTAL):
-            if cut_line == 0 or swept >= _MAX_SWEEP:
-                break
-            above = lines[cut_line - 1][2]
-            if not _FURNITURE.search(above):
-                break
-            if above.strip():
-                swept += 1
-            cut_line -= 1
-        if sum(nw[i] for i in range(cut_line)) < _MIN_VISIBLE_WORDS:
-            return None                          # would hollow the message out
-        src = next((cov[i] for i in tail if cov[i] is not None), None)
-        return lines[cut_line][0], src
+        # try the full tail first; when an UNCOVERED suffix (disclaimer,
+        # bottom-posted text) ruins its coverage, retry bounded at the last
+        # quoted line -- the suffix then simply stays visible.
+        for end_line in (len(lines) - 1, last_cov):
+            if end_line < ci:
+                continue
+            region = [i for i, t in enumerate(toks) if ci <= t[1] <= end_line]
+            if not region:
+                continue
+            covered = sum(1 for i in region if cov[i] is not None)
+            if (covered < _MIN_TAIL_COVERED
+                    or covered / len(region) < _TAIL_COVER):
+                continue
+            cut_line = ci                       # climb over quote furniture
+            swept = 0                           # blanks free; real lines capped
+            for _ in range(_MAX_SWEEP_TOTAL):
+                if cut_line == 0 or swept >= _MAX_SWEEP:
+                    break
+                above = lines[cut_line - 1][2]
+                if not _FURNITURE.search(above):
+                    break
+                if above.strip():
+                    swept += 1
+                cut_line -= 1
+            if sum(nw[i] for i in range(cut_line)) < _MIN_VISIBLE_WORDS:
+                continue                         # would hollow the message out
+                                                 # -> a deeper candidate may fit
+            src = next((cov[i] for i in region if cov[i] is not None), None)
+            end = (None if end_line >= len(lines) - 1
+                   or all(nw[i] == 0 for i in range(end_line + 1, len(lines)))
+                   else lines[end_line][1])
+            return lines[cut_line][0], end, src
     return None
 
 
@@ -216,8 +233,11 @@ def _plan(full, prior):
 
 def _split_seg(seg, off):
     """Split a segment's text at ``off``; the tail becomes a fresh <span>
-    placed immediately after the head, and is returned as the fold's first
-    node. (A <span> is legal inside <pre>, <p> and <blockquote> alike.)"""
+    placed immediately after the head, and is returned as the new node. The
+    segment's snapshot shrinks to the head so a LATER split of the same
+    segment (a bounded fold's start after its end was materialized) cannot
+    resurrect text that already moved out. (A <span> is legal inside <pre>,
+    <p> and <blockquote> alike.)"""
     head, tail = seg.text[:off], seg.text[off:]
     span = lhtml.Element("span")
     span.text = tail
@@ -228,33 +248,32 @@ def _split_seg(seg, off):
         seg.el.tail = head
         parent = seg.el.getparent()
         parent.insert(parent.index(seg.el) + 1, span)
+    seg.text = head
     return span
 
 
-def _fold_from(body, segs, cut, who):
-    """Wrap everything in ``body`` from text offset ``cut`` to the end in a
-    <details class=q>. Ancestors are split at the cut so formatting elements
-    (<pre>, <blockquote>, ...) survive on both sides."""
-    seg = next((s for s in segs if s.start + len(s.text) > cut), None)
+def _materialize(body, segs, off):
+    """Split the DOM at text offset ``off`` and climb to a direct child of
+    ``body``: every ancestor is split so that the returned node and all its
+    following body-level siblings hold exactly the content from ``off`` on.
+    Returns None when ``off`` is at/after the end (nothing to split)."""
+    seg = next((s for s in segs if s.start + len(s.text) > off), None)
     if seg is None:
-        return False
-    if cut > seg.start:
-        node = _split_seg(seg, cut - seg.start)
+        return None
+    if off > seg.start:
+        node = _split_seg(seg, off - seg.start)
     elif seg.attr == "text":
-        node = seg.el                            # fold the whole element
+        node = seg.el                            # boundary at element start
     else:
         node = _split_seg(seg, 0)                # tail text -> own node
 
-    # climb to a direct child of body, splitting each ancestor: `cur` and its
-    # following siblings move into a shallow copy of the ancestor placed right
-    # after it; the copy becomes the unit to carry up to the next level.
     cur = node
     while True:
         parent = cur.getparent()
         if parent is None:
-            return False
+            return None
         if parent is body:
-            break
+            return cur
         wrapper = lhtml.Element(parent.tag, dict(parent.attrib))
         for sib in list(parent[parent.index(cur):]):
             wrapper.append(sib)                  # moves them (incl. cur)
@@ -268,6 +287,17 @@ def _fold_from(body, segs, cut, who):
             gp.insert(gp.index(parent) + 1, wrapper)
             wrapper.tail, parent.tail = parent.tail, None
         cur = wrapper
+
+
+def _fold_range(body, segs, cut, end, who):
+    """Wrap ``body``'s content from text offset ``cut`` to ``end`` (None =
+    the end of the message) in a <details class=q>. The END boundary is
+    materialized first -- splitting there cannot disturb offsets before it;
+    the start split then works on the already-shrunk segment snapshots."""
+    stop = _materialize(body, segs, end) if end is not None else None
+    cur = _materialize(body, segs, cut)
+    if cur is None:
+        return False
 
     det = lhtml.Element("details")
     det.set("class", "q")
@@ -284,7 +314,11 @@ def _fold_from(body, segs, cut, who):
     det.append(summary)
 
     i = body.index(cur)
-    movers = list(body[i:])
+    movers = []
+    for sib in list(body[i:]):
+        if stop is not None and sib is stop:
+            break
+        movers.append(sib)
     body.insert(i, det)
     for sib in movers:
         det.append(sib)
@@ -314,10 +348,10 @@ def fold_thread(bodies, authors):
             if prior:
                 plan = _plan(full, prior)
                 if plan is not None:
-                    cut, src = plan
+                    cut, end, src = plan
                     who = (authors[src]
                            if src is not None and 0 <= src < mi else None)
-                    if _fold_from(body, segs, cut, who):
+                    if _fold_range(body, segs, cut, end, who):
                         ser = lhtml.tostring(root, encoding="unicode")
                         folded = re.sub(r"^<x-fold>|</x-fold>$", "", ser)
         except Exception:
