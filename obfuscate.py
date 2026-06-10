@@ -400,10 +400,15 @@ def _is_image(ct: str, name: str) -> bool:
             or (name or "").lower().endswith(_IMG_EXTS))
 
 
+# WHITELIST, not blacklist: unknown/private chunks (Photoshop, tooling) can
+# carry creator metadata, so only structural + display chunks survive.
+_PNG_KEEP = {b"IHDR", b"PLTE", b"tRNS", b"gAMA", b"cHRM", b"sRGB",
+             b"sBIT", b"pHYs", b"bKGD", b"hIST", b"IDAT", b"IEND"}
+
+
 def _strip_png_meta(data: bytes):
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         return None
-    drop = {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}
     out, i = bytearray(data[:8]), 8
     while i + 8 <= len(data):
         ln = int.from_bytes(data[i:i + 4], "big")
@@ -411,10 +416,10 @@ def _strip_png_meta(data: bytes):
         end = i + 12 + ln                       # len + type + data + crc
         if end > len(data):
             return None                         # truncated/malformed
-        if typ not in drop:                     # untouched chunks keep their CRC
+        if typ in _PNG_KEEP:                    # untouched chunks keep their CRC
             out += data[i:end]
         i = end
-        if typ == b"IEND":
+        if typ == b"IEND":                      # trailing bytes are dropped too
             return bytes(out)
     return None
 
@@ -430,16 +435,28 @@ def _strip_jpeg_meta(data: bytes):
         if marker == 0xFF:                      # fill byte
             i += 1
             continue
-        if marker in (0xD9, 0xDA):              # EOI / SOS: copy scan to end
-            out += data[i:]
+        if marker in (0xD9, 0xDA):
+            # Scan data: copy through the FIRST EOI only (a bare FFD9 cannot
+            # occur inside entropy-coded data -- FF bytes are stuffed). This
+            # drops trailing payloads after EOI: motion-photo videos,
+            # extended-XMP, MPF and other vendor trailers.
+            eoi = data.find(b"\xff\xd9", i)
+            if eoi < 0:
+                return None
+            out += data[i:eoi + 2]
             return bytes(out)
         ln = int.from_bytes(data[i + 2:i + 4], "big")
         if ln < 2 or i + 2 + ln > len(data):
             return None
-        # APP1..APP15 (EXIF/XMP/ICC-adjacent metadata) and COM comments are
-        # dropped; APP0 (JFIF) and the structural segments stay.
-        if not (0xE1 <= marker <= 0xEF or marker == 0xFE):
-            out += data[i:i + 2 + ln]
+        seg = data[i:i + 2 + ln]
+        # WHITELIST: structural segments (SOF/DHT/DQT/DRI...) pass; of the
+        # metadata carriers only a genuine JFIF APP0 survives (an APP0 can
+        # also be a JFXX thumbnail container). APP1..15 + COM are dropped.
+        if marker == 0xE0:
+            if seg[4:9] == b"JFIF\x00":
+                out += seg
+        elif not (0xE1 <= marker <= 0xEF or marker == 0xFE):
+            out += seg
         i += 2 + ln
     return None
 

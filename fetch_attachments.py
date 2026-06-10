@@ -41,6 +41,9 @@ KEEP = {
 }
 IMG_EXTS = {"png", "jpg", "jpeg"}
 IMG_MAX = 300 * 1024          # per-image ceiling: screenshots, not photo dumps
+IMG_MIN = 16 * 1024           # floor for INLINE images only: signature logos,
+#                               banners and pixels are tiny; a deliberately
+#                               ATTACHED image is kept whatever its size.
 URL_RE = re.compile(r"URL:\s*<([^>]+)>", re.S)
 UA = "xymon-discussion-public/1.0 (+attachments)"
 
@@ -107,8 +110,11 @@ def main(argv=None) -> None:
         try:
             data, hdr = httpget(url)
             ctype = hdr.get("Content-Type", "").split(";")[0].strip()
-            if ext_of(url) in IMG_EXTS and len(data) > IMG_MAX:
-                print(f"  - image over {IMG_MAX // 1024} KB cap, skipped: {url}")
+            # Pipermail scrub-URLs carry no disposition, so the inline floor
+            # applies too: tiny images there are signature decoration.
+            if ext_of(url) in IMG_EXTS and not (IMG_MIN <= len(data) <= IMG_MAX):
+                print(f"  - image outside {IMG_MIN // 1024}-{IMG_MAX // 1024} "
+                      f"KB bounds, skipped: {url}")
                 continue
             conn.execute(
                 "INSERT OR IGNORE INTO attachment "

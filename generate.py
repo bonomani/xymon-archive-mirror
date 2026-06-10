@@ -17,6 +17,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -969,7 +970,38 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "11-image-att"
+RENDER_VERSION = "12-att-hash"
+
+
+def _att_dir(a) -> str:
+    """Content-addressed att/ directory: identical bytes are stored once on
+    the site however many messages carry them, and the URL is stable across
+    DB rebuilds (row ids churn; content hashes don't)."""
+    return hashlib.sha1(a["content"] or b"").hexdigest()[:16]
+
+
+def _sweep_att(out: Path, atts_by_msgid) -> None:
+    """Delete att/ entries not derived from the current DB. Content-addressed
+    dirs are immutable, so a later-cleaned/withheld attachment lands in a NEW
+    dir -- without this sweep the OLD bytes would linger in the CI-cached
+    site. Also clears orphans of deleted rows and the pre-hash numeric dirs
+    (neither was ever pruned before). The expected set spans ALL attachments,
+    independent of the incremental thread skip-logic, so cached files of
+    skipped threads survive."""
+    expected: dict[str, set] = {}
+    for atts in atts_by_msgid.values():
+        for a in atts:
+            expected.setdefault(_att_dir(a), set()).add(_safe(a["filename"]))
+    root = out / "att"
+    if not root.exists():
+        return
+    for d in root.iterdir():
+        if d.name not in expected:
+            shutil.rmtree(d) if d.is_dir() else d.unlink()
+        else:
+            for f in d.iterdir():
+                if f.name not in expected[d.name]:
+                    f.unlink()
 
 # The four index tabs (label, href) in display order; the Search tab is the
 # site root. One list feeds the tab bar, the page writer AND the sitemap, so
@@ -1011,6 +1043,7 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     sidx = _write_search_indexes(conn, out, has_tid, att_counts, tid_of)
     _write_month_pages(conn, out, months, att_counts, has_tid)
     bythread = _write_thread_pages(conn, out, has_tid, atts_by_msgid)
+    _sweep_att(out, atts_by_msgid)
     _write_seo(out, months, bythread, sidx)
     conn.close()
     print(f"Generated site in {out}/ ({len(months)} months)")
@@ -1346,10 +1379,11 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
         links = ""
         for a in atts:
             fname = _safe(a["filename"])
-            adir = out / "att" / str(a["id"])
+            digest = _att_dir(a)
+            adir = out / "att" / digest
             adir.mkdir(parents=True, exist_ok=True)
             (adir / fname).write_bytes(a["content"])
-            href = f"../att/{a['id']}/{e(fname)}"
+            href = f"../att/{digest}/{e(fname)}"
             is_img = ((a["content_type"] or "").lower().startswith("image/")
                       or fname.lower().endswith((".png", ".jpg", ".jpeg")))
             # screenshots render inline (metadata already stripped by

@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 import mailstore
-from fetch_attachments import IMG_EXTS, IMG_MAX, KEEP
+from fetch_attachments import IMG_EXTS, IMG_MAX, IMG_MIN, KEEP
 
 _VIA = re.compile(r"\s+via\s+Xymon\s*$", re.I)
 _KEEP_CT = {"text/x-patch", "text/x-diff", "application/zip",
@@ -42,9 +42,16 @@ def inline_attachments(msg, msgid, month) -> list[dict]:
         data = part.get_payload(decode=True) or b""
         if not data:
             continue
-        if ((ct.startswith("image/") or ext in IMG_EXTS)
-                and len(data) > IMG_MAX):
-            continue              # screenshots only, not photo dumps
+        if ct.startswith("image/") or ext in IMG_EXTS:
+            if len(data) > IMG_MAX:
+                continue          # screenshots only, not photo dumps
+            # disposition decides decoration vs content: a deliberately
+            # ATTACHED image is kept at any size; an INLINE one (cid logo,
+            # banner, pasted screenshot) only when it is big enough to be
+            # real content rather than signature decoration.
+            if (part.get_content_disposition() != "attachment"
+                    and len(data) < IMG_MIN):
+                continue
         idx += 1
         out.append({
             "msgid": msgid, "month": month,

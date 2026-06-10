@@ -676,6 +676,30 @@ def test_strip_image_metadata_png_and_jpeg():
     assert obfuscate.strip_image_metadata("image/gif", "x.gif", b"GIF89a") is None
 
 
+def test_strip_png_is_a_whitelist():
+    # unknown/private ancillary chunks are dropped, display chunks survive
+    dirty = _png_bytes(_png_chunk(b"prVt", b"creator secret"))
+    assert obfuscate.strip_image_metadata("image/png", "s.png", dirty) \
+        == _png_bytes()
+    with_phys = _png_bytes(_png_chunk(b"pHYs", b"\x00" * 9))
+    assert obfuscate.strip_image_metadata(
+        "image/png", "s.png", with_phys) == with_phys
+
+
+def test_strip_jpeg_drops_trailer_and_jfxx():
+    # trailing payload after EOI (motion-photo video, extended XMP, vendor
+    # trailers) must not survive
+    dirty = _jpeg_bytes() + b"MOTION-PHOTO-MP4-PAYLOAD"
+    assert obfuscate.strip_image_metadata(
+        "image/jpeg", "p.jpg", dirty) == _jpeg_bytes()
+    # an APP0 that is NOT a genuine JFIF header (e.g. a JFXX thumbnail
+    # container) is dropped
+    jfxx = b"\xff\xe0" + (7).to_bytes(2, "big") + b"JFXX\x00"
+    dirty2 = b"\xff\xd8" + jfxx + _jpeg_bytes()[2:]
+    assert obfuscate.strip_image_metadata(
+        "image/jpeg", "p.jpg", dirty2) == _jpeg_bytes()
+
+
 def test_obfuscate_strips_image_metadata_and_withholds_malformed(
         tmp_path, monkeypatch):
     monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
@@ -695,7 +719,7 @@ def test_obfuscate_strips_image_metadata_and_withholds_malformed(
     assert b"withheld" in c2 and ct2 == "text/plain"
 
 
-def test_import_inline_attachments_image_cap():
+def test_import_inline_attachments_image_policy():
     from email.message import EmailMessage
 
     import import_mbox
@@ -704,12 +728,19 @@ def test_import_inline_attachments_image_cap():
     m.set_content("hi")
     m.add_attachment(b"x" * (import_mbox.IMG_MAX + 1),
                      maintype="image", subtype="png", filename="big.png")
-    m.add_attachment(_png_bytes(),
-                     maintype="image", subtype="png", filename="small.png")
-    out = import_mbox.inline_attachments(m, "<i@x>", "2026-June")
-    names = [a["filename"] for a in out]
-    assert "small.png" in names
+    m.add_attachment(_png_bytes(),                # tiny but ATTACHED -> kept
+                     maintype="image", subtype="png", filename="crop.png")
+    m.add_attachment(b"x" * 2048,                 # tiny + INLINE -> sig logo
+                     maintype="image", subtype="png", filename="image001.png",
+                     disposition="inline")
+    m.add_attachment(b"x" * (import_mbox.IMG_MIN + 1),
+                     maintype="image", subtype="png", filename="pasted.png",
+                     disposition="inline")        # big inline -> real content
+    names = [a["filename"]
+             for a in import_mbox.inline_attachments(m, "<i@x>", "2026-June")]
+    assert "crop.png" in names and "pasted.png" in names
     assert "big.png" not in names                 # over the per-image cap
+    assert "image001.png" not in names            # inline decoration
 
 
 def test_build_renders_image_attachment_inline(tmp_path):
@@ -729,11 +760,17 @@ def test_build_renders_image_attachment_inline(tmp_path):
         "'shot.png','image/png',?,?)", (len(png), png))
     conn.commit()
     conn.close()
+    stale = out / "att" / "999"                  # pre-hash leftover in cache
+    stale.mkdir(parents=True)
+    (stale / "old.bin").write_bytes(b"stale")
     generate.build(db, out)
     (page_path,) = list((out / "thread").glob("*.html"))
     html_ = page_path.read_text("utf-8")
-    assert "<img src='../att/" in html_ and "shot.png" in html_
-    assert (out / "att").rglob("shot.png")        # file materialized
+    import hashlib as _h
+    digest = _h.sha1(png).hexdigest()[:16]
+    assert f"<img src='../att/{digest}/shot.png'" in html_
+    assert (out / "att" / digest / "shot.png").read_bytes() == png
+    assert not stale.exists()                    # sweep removed the orphan
 
 
 # --- mailstore.iter_mbox: the one mbox splitter --------------------------------
