@@ -970,7 +970,41 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "12-att-hash"
+RENDER_VERSION = "13-cid-att"
+
+
+_CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')
+
+
+def _att_cid(a):
+    return a["cid"] if "cid" in a.keys() else None
+
+
+def _resolve_cids(mbody: str, atts) -> str:
+    """Point the sanitizer's <img src="cid:..."> placeholders at the message's
+    extracted attachment files (metadata-stripped, content-addressed,
+    deduped). A reference whose part was filtered at ingest (signature logo,
+    over-cap) is dropped entirely rather than left broken. Both the stored
+    cid and the one inside body_html went through the same obfuscation
+    transform, so matching survives address-shaped Content-IDs."""
+    if "cid:" not in mbody:
+        return mbody
+    cmap = {}
+    for a in atts:
+        c = _att_cid(a)
+        if c:
+            cmap[c] = a
+            cmap.setdefault(c.lower(), a)
+
+    def _sub(m):
+        key = html.unescape(m.group(1))
+        a = cmap.get(key) or cmap.get(key.lower())
+        if not a:
+            return ""
+        fname = _safe(a["filename"])
+        return (f"<img src='../att/{_att_dir(a)}/{e(fname)}' "
+                f"alt='{e(fname)}' loading=lazy>")
+    return _CID_IMG.sub(_sub, mbody)
 
 
 def _att_dir(a) -> str:
@@ -1094,10 +1128,12 @@ def _prepare_out(out: Path) -> None:
 def _load_attachments(conn):
     """Attachments grouped by their message (msgid):
     (atts_by_msgid, att_counts, att_msg_per_month)."""
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(attachment)")}
+    _ccol = ", cid" if "cid" in acols else ""
     atts_by_msgid: dict[str, list] = defaultdict(list)
     for a in conn.execute(
-            "SELECT id, msgid, filename, content_type, size, content "
-            "FROM attachment WHERE msgid IS NOT NULL"):
+            "SELECT id, msgid, filename, content_type, size, content"
+            f"{_ccol} FROM attachment WHERE msgid IS NOT NULL"):
         atts_by_msgid[a["msgid"]].append(a)
     att_counts = {mid: len(v) for mid, v in atts_by_msgid.items()}
     att_msg_per_month = dict(conn.execute(
@@ -1387,9 +1423,11 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             is_img = ((a["content_type"] or "").lower().startswith("image/")
                       or fname.lower().endswith((".png", ".jpg", ".jpeg")))
             # screenshots render inline (metadata already stripped by
-            # obfuscate.py); everything else stays a download link.
+            # obfuscate.py); everything else stays a download link. A
+            # cid-referenced image already shows at its in-text position
+            # (see _resolve_cids), so its box entry stays a plain link.
             label = (f"<img src='{href}' alt='{e(fname)}' loading=lazy>"
-                     f"{e(fname)}" if is_img else e(fname))
+                     f"{e(fname)}" if is_img and not _att_cid(a) else e(fname))
             links += (f"<li><a href='{href}'>{label}</a> "
                       f"<span class=meta>{e(a['content_type'] or '')} &middot; "
                       f"{_human(a['size'])}</span></li>")
@@ -1404,7 +1442,7 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             ["\x1f".join([msg_name(r), r["subject"] or "", whom(r),
                           r["from_email"] or "", r["date_raw"] or "",
                           r["source"] or "", r["body"] or "", r["body_html"] or "",
-                          ";".join(f"{a['id']}:{a['size']}"
+                          ";".join(f"{a['id']}:{a['size']}:{_att_cid(a) or ''}"
                                    for a in atts_by_msgid.get(r["msgid"], ()))])
              for r in members])).encode("utf-8", "replace"),
             digest_size=16).hexdigest()
@@ -1422,7 +1460,8 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
                      if (r["from_email"] and "@" in r["from_email"]
                          and not r["from_email"].endswith("@xymon.invalid"))
                      else "")
-            mbody = body_to_html(r["body"], r["body_html"])
+            mbody = _resolve_cids(body_to_html(r["body"], r["body_html"]),
+                                  atts_by_msgid.get(r["msgid"], ()))
             matts = _att_block(r)
             # thread block (foldable, threaded view). The copy marker's data-href
             # is the MESSAGE permalink -> its canonical msg/<id>.html page.

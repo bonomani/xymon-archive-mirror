@@ -773,6 +773,105 @@ def test_build_renders_image_attachment_inline(tmp_path):
     assert not stale.exists()                    # sweep removed the orphan
 
 
+# --- cid-embedded images: placeholder -> resolved att/ reference ---------------
+
+def test_sanitizer_keeps_cid_placeholder_drops_external():
+    out = mailstore.sanitize_html(
+        '<p>see</p><img src="cid:shot1@host" alt="x">'
+        '<img src="https://tracker.example/p.png">')
+    assert '<img src="cid:shot1@host"' in out          # placeholder survives
+    assert "tracker.example" not in out                 # external still dropped
+    assert "data:" not in out                           # no base64 inlining
+
+
+def test_import_inline_attachments_records_cid():
+    from email.message import EmailMessage
+
+    import import_mbox
+    m = EmailMessage()
+    m["Message-Id"] = "<c@x>"
+    m.set_content("hi")
+    m.add_attachment(_png_bytes(), maintype="image", subtype="png",
+                     filename="s.png", cid="<shot1@host>")
+    (a,) = import_mbox.inline_attachments(m, "<c@x>", "2026-June")
+    assert a["cid"] == "shot1@host"
+
+
+def test_build_resolves_cid_and_strips_unmatched(tmp_path):
+    db, out = tmp_path / "a.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [dict(
+        month="2026-June", msgid="<c@x>", in_reply_to=None, subject="Cid",
+        from_name="Ann", from_email="user-x@xymon.invalid",
+        date_iso="2026-06-01T10:00:00+00:00",
+        date_raw="Tue, 1 Jun 2026 10:00:00 -0000",
+        body="plain fallback", source="list",
+        body_html=('<p>before</p><img src="cid:shot1@host" alt="" '
+                   'loading="lazy"><p>after</p>'
+                   '<img src="cid:logo-filtered@host" alt="" loading="lazy">'),
+        raw=None)])
+    png = _png_bytes()
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content, cid) VALUES ('<c@x>','2026-June','inline:<c@x>#1',"
+        "'s.png','image/png',?,?,'shot1@host')", (len(png), png))
+    conn.commit()
+    conn.close()
+    generate.build(db, out)
+    (page_path,) = list((out / "thread").glob("*.html"))
+    html_ = page_path.read_text("utf-8")
+    import hashlib as _h
+    digest = _h.sha1(png).hexdigest()[:16]
+    # resolved at its in-text position, between the two paragraphs
+    assert (f"<p>before</p><img src='../att/{digest}/s.png' "
+            f"alt='s.png' loading=lazy><p>after</p>") in html_
+    assert "cid:" not in html_            # unmatched reference stripped
+    # the box lists the cid-referenced file as a LINK, not a second thumbnail
+    assert html_.count(f"<img src='../att/{digest}/s.png'") == 1
+
+
+def test_dbhash_covers_cid(tmp_path):
+    import dbhash
+    a, b = str(tmp_path / "a.db"), str(tmp_path / "b.db")
+    for path, cid in ((a, "one@x"), (b, "two@x")):
+        conn = mailstore.connect(path)
+        conn.execute(
+            "INSERT INTO attachment (msgid, url, filename, content_type, "
+            "size, content, cid) VALUES ('<m@x>','u','f','image/png',1,"
+            "X'00',?)", (cid,))
+        conn.commit()
+        conn.close()
+    assert dbhash.fingerprint(a) != dbhash.fingerprint(b)
+
+
+def test_obfuscate_transforms_cid_and_html_ref_identically(tmp_path,
+                                                           monkeypatch):
+    # an address-shaped Content-ID must end up IDENTICAL in the attachment
+    # row and inside body_html, or cid resolution would break after masking
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "a.db")
+    conn = mailstore.connect(db)
+    mailstore.insert_rows(conn, [dict(
+        month="2026-June", msgid="<m@x>", in_reply_to=None, subject="s",
+        from_name="A", from_email="a@real.com",
+        date_iso="2026-06-01T10:00:00+00:00", date_raw="d",
+        body="b", source="list",
+        body_html='<img src="cid:john@realhost.com" alt="" loading="lazy">',
+        raw=None)])
+    conn.execute(
+        "INSERT INTO attachment (msgid, url, filename, content_type, size, "
+        "content, cid) VALUES ('<m@x>','u','f','image/png',1,X'00',"
+        "'john@realhost.com')")
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    c = sqlite3.connect(db)
+    (cid,) = c.execute("SELECT cid FROM attachment").fetchone()
+    (bh,) = c.execute("SELECT body_html FROM message").fetchone()
+    assert "john@realhost.com" not in cid and "john@realhost.com" not in bh
+    assert f'src="cid:{cid}"' in bh       # same transform on both sides
+
+
 # --- mailstore.iter_mbox: the one mbox splitter --------------------------------
 
 def test_iter_mbox_unescapes_mboxrd_but_keeps_chunk_verbatim():

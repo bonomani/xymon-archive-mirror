@@ -8,7 +8,6 @@ agnostic.
 """
 from __future__ import annotations
 
-import base64
 import email
 import html
 import re
@@ -22,7 +21,6 @@ from pathlib import Path
 from typing import Optional
 
 _META_CHARSET_SNIFF = 2048      # bytes of HTML scanned for a <meta charset> hint
-_CID_IMG_MAX = 256_000          # max size of an inlined cid: image (data URI)
 
 
 def decode_mime(s: Optional[str]) -> str:
@@ -139,29 +137,28 @@ _DROP_TREE = {"script", "style", "head", "title", "object", "iframe"}
 
 
 class _Sanitizer(HTMLParser):
-    def __init__(self, cid_map=None) -> None:
+    def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.out: list[str] = []
         self.skip = 0
         self.stack: list[str] = []    # open allowed tags, to keep output balanced
-        self.cid = cid_map or {}      # Content-ID -> (mimetype, bytes)
 
     def _img(self, attrs):
-        # Render ONLY embedded cid: images (no network fetch, no tracking) as
-        # self-contained data URIs. External images stay dropped.
+        # Keep ONLY embedded cid: references (no network fetch, no tracking),
+        # as a normalized placeholder the renderer resolves to the message's
+        # extracted attachment (metadata-stripped, deduped, capped) -- or
+        # strips when the part was filtered (signature logos). External
+        # images stay dropped. Replaces the old base64 data-URI inlining,
+        # which bypassed the metadata stripper and duplicated bytes per page.
         if self.skip:
             return
         a = dict(attrs)
         src = (a.get("src") or "")
         if src.lower().startswith("cid:"):
-            part = self.cid.get(src[4:].strip().strip("<>"))
-            if part:
-                mime, data = part
-                b64 = base64.b64encode(data).decode("ascii")
-                alt = html.escape(a.get("alt") or "", quote=True)
-                self.out.append(
-                    f'<img src="data:{mime};base64,{b64}" alt="{alt}" '
-                    'loading="lazy">')
+            key = html.escape(src[4:].strip().strip("<>"), quote=True)
+            alt = html.escape(a.get("alt") or "", quote=True)
+            self.out.append(f'<img src="cid:{key}" alt="{alt}" '
+                            'loading="lazy">')
 
     def handle_starttag(self, tag, attrs):
         if tag == "img":
@@ -212,8 +209,8 @@ class _Sanitizer(HTMLParser):
             self.out.append(html.escape(data))
 
 
-def sanitize_html(s: str, cid_map=None) -> str:
-    p = _Sanitizer(cid_map)
+def sanitize_html(s: str) -> str:
+    p = _Sanitizer()
     p.feed(s)
     p.close()
     while p.stack:                    # close any tags the source left open
@@ -241,18 +238,11 @@ def decode_payload(payload: bytes, declared: Optional[str]) -> str:
 def html_part(msg: Message) -> Optional[str]:
     """Return the sanitized HTML alternative of a message, or None.
 
-    Embedded ``cid:`` images (<=256 KB) are inlined as data URIs so genuine
-    in-message screenshots/diagrams render; external images stay stripped.
+    Embedded ``cid:`` images survive as normalized ``cid:`` placeholders;
+    the renderer resolves them to the extracted (metadata-stripped, deduped)
+    attachment files. External images stay stripped.
     """
     parts = list(msg.walk()) if msg.is_multipart() else [msg]
-    cid_map = {}
-    for part in parts:
-        cid = part.get("Content-ID")
-        if cid and part.get_content_type().startswith("image/"):
-            data = part.get_payload(decode=True)
-            if data and len(data) <= _CID_IMG_MAX:
-                cid_map[cid.strip().strip("<>")] = (part.get_content_type(),
-                                                    data)
     for part in parts:
         if part.get_content_type() != "text/html":
             continue
@@ -266,7 +256,7 @@ def html_part(msg: Message) -> Optional[str]:
         payload = part.get_payload(decode=True)
         if payload:
             text = decode_payload(payload, part.get_content_charset())
-            out = sanitize_html(text, cid_map)
+            out = sanitize_html(text)
             # ignore an HTML part that sanitises to no real text -- it would
             # render as a blank message; fall back to the text/plain body.
             if out and re.sub(r"<[^>]+>", "", out).replace("\xa0", " ").strip():
@@ -312,8 +302,9 @@ CREATE TABLE IF NOT EXISTS attachment (
     filename     TEXT,
     content_type TEXT,
     size         INTEGER,
-    content      BLOB
-);
+    content      BLOB,
+    cid          TEXT              -- Content-ID when the part was referenced
+);                                 --   as <img src="cid:..."> in the HTML
 CREATE INDEX IF NOT EXISTS idx_attachment_msgid ON attachment(msgid);
 """
 
@@ -327,6 +318,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE message ADD COLUMN body_html TEXT")
     if "raw" not in cols:
         conn.execute("ALTER TABLE message ADD COLUMN raw BLOB")
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(attachment)")}
+    if acols and "cid" not in acols:
+        conn.execute("ALTER TABLE attachment ADD COLUMN cid TEXT")
     conn.commit()
 
 

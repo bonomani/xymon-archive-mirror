@@ -67,10 +67,13 @@ def fingerprint(db: str) -> str:
     # attachment is re-sanitised), so a real content change would not republish.
     if con.execute("SELECT name FROM sqlite_master "
                    "WHERE type='table' AND name='attachment'").fetchone():
-        for url, fn, ct, content in con.execute(
-                "SELECT url, filename, content_type, content FROM attachment"):
+        acols = {r[1] for r in con.execute("PRAGMA table_info(attachment)")}
+        cidcol = ", cid" if "cid" in acols else ", NULL"
+        for url, fn, ct, content, cid in con.execute(
+                "SELECT url, filename, content_type, content" + cidcol +
+                " FROM attachment"):
             ch = hashlib.sha256(content).hexdigest() if content is not None else None
-            acc = (acc + _row_digest((url, fn, ct, ch))) % _MOD
+            acc = (acc + _row_digest((url, fn, ct, ch, cid))) % _MOD
     con.close()
     return f"{acc:064x}"
 

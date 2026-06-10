@@ -53,11 +53,13 @@ def inline_attachments(msg, msgid, month) -> list[dict]:
                     and len(data) < IMG_MIN):
                 continue
         idx += 1
+        cid = (part.get("Content-ID") or "").strip().strip("<>")
         out.append({
             "msgid": msgid, "month": month,
             "url": f"inline:{msgid}#{idx}",      # synthetic idempotency key
             "filename": fn, "content_type": ct,
             "size": len(data), "content": data,
+            "cid": cid or None,   # set when the HTML references it (cid:)
         })
     return out
 
@@ -88,8 +90,9 @@ def main() -> None:
     before = conn.total_changes
     conn.executemany(
         "INSERT OR IGNORE INTO attachment "
-        "(msgid, month, url, filename, content_type, size, content) "
-        "VALUES (:msgid,:month,:url,:filename,:content_type,:size,:content)",
+        "(msgid, month, url, filename, content_type, size, content, cid) "
+        "VALUES (:msgid,:month,:url,:filename,:content_type,:size,:content,"
+        ":cid)",
         atts)
     conn.commit()
     att_added = conn.total_changes - before

@@ -894,19 +894,22 @@ def obfuscate(db: str) -> None:
     # out of those metadata fields as well (url is not the rendered link -- the
     # site serves the stored content -- so rewriting it breaks nothing).
     att_changed = 0
+    acols = {c[1] for c in conn.execute("PRAGMA table_info(attachment)")}
+    _cidcol = ", cid" if "cid" in acols else ", NULL"
     arows = conn.execute(
-        "SELECT id, msgid, content_type, content, filename, url FROM attachment "
-        "WHERE COALESCE(obfuscated, 0)=0").fetchall()
-    for aid, amsgid, ct, content, fname, url in arows:
+        "SELECT id, msgid, content_type, content, filename, url" + _cidcol +
+        " FROM attachment WHERE COALESCE(obfuscated, 0)=0").fetchall()
+    for aid, amsgid, ct, content, fname, url, cid in arows:
         if amsgid:
             nam = _T.sub(repl_t, amsgid)
             if nam != amsgid:
                 conn.execute("UPDATE attachment SET msgid=? WHERE id=?",
                              (nam, aid))
-        nfn, nurl = text(fname), text(url)
-        if nfn != fname or nurl != url:
-            conn.execute("UPDATE attachment SET filename=?, url=? WHERE id=?",
-                         (nfn, nurl, aid))
+        nfn, nurl, ncid = text(fname), text(url), text(cid)
+        if nfn != fname or nurl != url or ncid != cid:
+            conn.execute(
+                "UPDATE attachment SET filename=?, url=?, cid=? WHERE id=?",
+                (nfn, nurl, ncid, aid))
         if content and _is_image(ct, fname):
             # pixels only: strip metadata containers; unparseable -> withhold
             # (note: content is used as-is -- the byte-level address scrubber
