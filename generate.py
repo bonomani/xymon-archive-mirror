@@ -227,6 +227,13 @@ function foldQuotes(root){
     for(var i=1;i<dets.length;i++){
       var a=dets[i-1], b=dets[i];
       if(!a.parentNode||!b.parentNode||a.contains(b)||b.contains(a)){ continue; }
+      // NEVER merge across message bodies: a Range spanning two .tmsg blocks
+      // splits the second <details> into a summary-less shell (browsers then
+      // show their locale's default label -- "Détails", "Details", ...) and
+      // swallows the next message into the previous fold. Triggered by a
+      // bottom quote followed by a short reply + attribution next message.
+      var ca=a.closest('.pt,.md'), cb=b.closest('.pt,.md');
+      if(!ca||ca!==cb) continue;
       var rg=document.createRange(), gap;
       try{ rg.setStartAfter(a); rg.setEndBefore(b); gap=rg.toString(); }catch(e){ continue; }
       // merge if nothing real sits between -- whitespace, OR just an attribution /

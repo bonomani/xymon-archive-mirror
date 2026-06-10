@@ -105,6 +105,33 @@ const idx = JSON.parse(fs.readFileSync(path.join(SITE, 'search-index.json'), 'ut
 const findMsg = (name, date) =>
   idx.find(r => (r[2] || '').includes(name) && (r[3] || '').startsWith(date));
 
+console.log('1d) folds never merge across messages (no summary-less "Détails" shells)');
+{
+  // Reproducer (thread db7b730b8752): a bottom quote in one message followed
+  // by a short reply + French attribution in the NEXT message. mergeAdjacent
+  // must not bridge the two -- a Range spanning two .tmsg blocks splits the
+  // second <details> into a summary-less shell (browsers then show their
+  // locale's default label, e.g. "Détails") and swallows the next message
+  // into the previous fold.
+  const q = '<blockquote><pre>orig text one two three four five six seven eight nine ten</pre></blockquote>';
+  const m1 = '<details class=tmsg id=m-a open><summary>s1</summary>' +
+    '<div class=pt><pre>Hi.</pre>' + q + '</div></details>';
+  const m2 = '<details class=tmsg id=m-b open><summary>s2</summary>' +
+    '<div class=pt><pre>Hello la liste! Bruno\n\nLe 09.06.2026 à 16:32, X a écrit :</pre>' +
+    q + '</div></details>';
+  const d = new JSDOM('<!doctype html><body data-root="./">' + m1 + m2 + '</body>',
+    { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const tm = [...document.querySelectorAll('details.tmsg')];
+  assert(tm.length === 2, 'two messages stay two <details.tmsg>');
+  const all = [...document.querySelectorAll('details')];
+  assert(all.every(t => t.querySelector(':scope>summary')),
+    'no summary-less <details> shell (the "Détails" bug)');
+  assert((tm[1] && tm[1].textContent || '').includes('Hello la liste'),
+    'second message keeps its own content');
+}
+
 console.log('2) folds carry a summary (no "Details" boxes) -- scan of the corpus');
 {
   const all = [...new Set(idx.map(r => r[6]).filter(Boolean))];
@@ -113,8 +140,9 @@ console.log('2) folds carry a summary (no "Details" boxes) -- scan of the corpus
   for (const tid of tids) {
     let dom;
     try { dom = foldDoc(tid); done++;
-      document.querySelectorAll('details.q').forEach(x => {
-        folds++; if (!x.querySelector(':scope>summary')) empty++; }); }
+      document.querySelectorAll('details').forEach(x => {   // .q AND .tmsg:
+        if (x.classList.contains('q')) folds++;             // a split shell
+        if (!x.querySelector(':scope>summary')) empty++; }); }   // = "Détails"
     catch (e) { errs++; }
     finally { if (dom) dom.window.close(); }
   }
