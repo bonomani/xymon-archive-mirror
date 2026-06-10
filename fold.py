@@ -28,8 +28,19 @@ and HTML mail take the same path and offsets cannot drift from the page.
 from __future__ import annotations
 
 import re
+import sys
 
-from lxml import html as lhtml
+# lxml is the build's only third-party runtime dependency, and only this
+# feature needs it: without it the build still renders everything, just with
+# unfolded thread pages (the client script's folder remains). That keeps
+# build.sh runnable on a bare stdlib Python and survives a stale workflow
+# copy on the 'data' branch.
+try:
+    from lxml import html as lhtml
+except ImportError:                                   # pragma: no cover
+    lhtml = None
+    print("fold: lxml not installed -- thread pages render UNFOLDED "
+          "(pip install lxml)", file=sys.stderr)
 
 K = 6                     # word-shingle size (matches the client script)
 _MIN_LINE_WORDS = 4       # a shorter line can't prove it is quoted by itself
@@ -287,6 +298,8 @@ def fold_thread(bodies, authors):
     ``authors``: display name per message (provenance labels). Returns the
     list with each validated quote tail wrapped in <details class=q>; a
     message with no provable tail is returned unchanged."""
+    if lhtml is None:                          # no lxml -> no server-side folds
+        return list(bodies)
     out = []
     prior: dict = {}
     for mi, raw in enumerate(bodies):
