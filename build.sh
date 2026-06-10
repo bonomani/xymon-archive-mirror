@@ -14,6 +14,8 @@
 #   IMAP_HOST/USER/PASSWORD        enable the IMAP source
 #   GH_DISCUSSIONS_REPO=owner/name enable the GitHub Discussions source
 #   HYPERKITTY_URL=...             (future) enable the HyperKitty source
+#   BASE_URL=https://host/path     absolute site URL -> sitemap.xml + canonical
+#                                  tags (auto-derived on GitHub Actions)
 set -eu
 cd "$(dirname "$0")"
 

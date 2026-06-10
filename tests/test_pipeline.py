@@ -417,6 +417,62 @@ def test_clean_name_mixed_case_preserved():
     assert generate._clean_name("Scot McConnell") == "Scot McConnell"
 
 
+# --- generate: page chrome, SEO scaffolding -----------------------------------
+
+def test_threads_page_no_literal_unicode_escape():
+    # the HTML half of the Threads template once leaked a literal "…"
+    # into the visible page text (the JS half may legitimately use JS escapes)
+    assert "\\u" not in generate._THREADS_PAGE.split("<script>")[0]
+
+
+def test_page_escapes_meta_description_and_title_once():
+    p = generate.page('A & B', 'body', desc='He said "x" & left')
+    assert 'content="He said &quot;x&quot; &amp; left"' in p
+    assert "<title>A &amp; B</title>" in p          # escaped exactly once
+
+
+def test_page_canonical_only_with_base():
+    old = generate._BASE
+    try:
+        generate._BASE = ""
+        assert "rel=canonical" not in generate.page("t", "b", canon="x.html")
+        generate._BASE = "https://example.org/site"
+        assert ("<link rel=canonical href='https://example.org/site/x.html'>"
+                in generate.page("t", "b", canon="x.html"))
+    finally:
+        generate._BASE = old
+
+
+def test_github_base_derivation(monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "Some-Org/some-repo")
+    assert generate._github_base() == "https://some-org.github.io/some-repo"
+    monkeypatch.setenv("GITHUB_REPOSITORY", "User/user.github.io")
+    assert generate._github_base() == "https://user.github.io"
+    monkeypatch.delenv("GITHUB_REPOSITORY")
+    assert generate._github_base() == ""
+
+
+def test_sitemap_single_and_chunked(tmp_path):
+    old = generate._BASE
+    try:
+        generate._BASE = "https://example.org/site"
+        generate._write_sitemaps(tmp_path, ["", "a.html"])
+        sm = (tmp_path / "sitemap.xml").read_text("utf-8")
+        assert "<urlset" in sm
+        assert "<loc>https://example.org/site/a.html</loc>" in sm
+        assert "<loc>https://example.org/site/</loc>" in sm
+        generate._write_sitemaps(
+            tmp_path, [f"m{i}.html" for i in range(7)], chunk=3)
+        idx = (tmp_path / "sitemap.xml").read_text("utf-8")
+        assert "<sitemapindex" in idx
+        assert (tmp_path / "sitemap-3.xml").exists()
+        # a re-run with fewer parts prunes the stale ones
+        generate._write_sitemaps(tmp_path, ["a.html"])
+        assert not (tmp_path / "sitemap-1.xml").exists()
+    finally:
+        generate._BASE = old
+
+
 # --- render_body.render_plain (bullets + wrapped-quote re-attach) -----------------
 
 _AVG3 = ("No virus found in this incoming message.\n"

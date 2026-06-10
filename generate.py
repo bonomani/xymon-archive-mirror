@@ -20,6 +20,7 @@ import re
 import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from names import clean as _clean_name
 
@@ -43,10 +44,10 @@ input:focus,select:focus,textarea:focus{outline:2px solid #338a3a;outline-offset
 .meta{color:#666;font-size:13px}
 pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
     border-radius:6px;overflow:auto}
-.cnt{color:#888;font-size:12px}
+.cnt{color:#666;font-size:12px}
 .mgrid{display:flex;flex-wrap:wrap;gap:4px 16px;margin:4px 0 8px}
 .mgrid a{text-decoration:none} .mgrid a.mgactive{font-weight:600;text-decoration:underline}
-.mgrid span{color:#bbb}
+.mgrid span{color:#767676}
 .mpanel{margin:0 0 16px;padding:6px 0 0;border-top:1px solid #e3e3e3} .mpanel ul{margin:6px 0}
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
     color:#fff;background:#888;margin-right:6px;vertical-align:1px}
@@ -99,7 +100,7 @@ pre a{color:#338a3a}
 #res{list-style:none;padding:0} #res>li{margin:0;padding:7px 2px;border-bottom:1px solid #eee}
 .sline{display:flex;align-items:baseline;gap:6px;font-size:14px}
 .tsub{font-weight:600;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.sline .meta{color:#888;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sline .meta{color:#666;flex:0 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .plinks{margin-left:auto;flex:none;display:flex;gap:10px;white-space:nowrap}
 .plink{font-size:14px;text-decoration:none;opacity:.65}
 .plink:hover{opacity:1}
@@ -118,15 +119,15 @@ pre a{color:#338a3a}
     padding:12px 16px;font-size:16px;border:1px solid #ccc;border-radius:9px}
 .hres{list-style:none;padding:0;max-width:620px;margin:6px auto}
 .hres li{margin:6px 0}
-.altlinks{text-align:center;font-size:13px;color:#888;margin:6px 0 18px}
+.altlinks{text-align:center;font-size:13px;color:#666;margin:6px 0 18px}
 .bars{margin:0}
 .bar{display:grid;grid-template-columns:46px 1fr 60px;align-items:center;
     gap:9px;font-size:13px;margin:3px 0}
-.bar .byr{color:#338a3a;text-decoration:none} .bar .bc{color:#888;text-align:right}
+.bar .byr{color:#338a3a;text-decoration:none} .bar .bc{color:#666;text-align:right}
 .ubar{display:grid;grid-template-columns:175px 1fr 56px;align-items:center;
     gap:9px;font-size:13px;margin:3px 0}
 .ubar .un{color:#338a3a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.ubar .bc{color:#888;text-align:right}
+.ubar .bc{color:#666;text-align:right}
 .stath{font-size:15px;font-weight:600;margin:22px 0 8px}
 .bars .stath:first-child{margin-top:0}
 .btrack{background:#e9f1e9;border-radius:3px}
@@ -409,9 +410,11 @@ function enhance(root){
   (root||document).querySelectorAll('.copy').forEach(function(b){
     var href=b.dataset.href||'', isThread=href.indexOf('#m-')<0;
     var a=document.createElement('a'); a.className='plink'; a.title='permalink';
+    a.setAttribute('aria-label','permalink');
     a.href=new URL(href,siteRoot()).href; a.innerHTML='&#128279;';  // link icon
     var c=document.createElement('button'); c.className='copytext'; c.type='button';
     c.innerHTML='&#128203;'; c.title=isThread?'copy whole thread':'copy this message';
+    c.setAttribute('aria-label',c.title);
     if(isThread) c.setAttribute('data-thread','');
     var f=document.createDocumentFragment();
     f.appendChild(a); f.appendChild(document.createTextNode(' ')); f.appendChild(c);
@@ -522,7 +525,7 @@ SEARCH_BODY = """
 <h1>Search the archive</h1>
 """ + _SEARCH_BLURB + """
 <input id=q type=search placeholder="e.g. SSL certificate, or a sender name"
-       autofocus autocomplete=off>
+       aria-label="Search the archive" autofocus autocomplete=off>
 <p class=meta>
   <label><input type=checkbox id=attonly> &#128206; with attachments only</label>
 </p>
@@ -530,21 +533,36 @@ SEARCH_BODY = """
 <ul id=res></ul>
 <script>
 let DATA=[], BODIES=null;
+let bodyReq=null, note='';
 const q=document.getElementById('q'), res=document.getElementById('res'),
       stat=document.getElementById('stat'),
       attonly=document.getElementById('attonly');
-Promise.all([
-  fetch('search-index.json').then(r=>r.json()),
-  fetch('body-index.json.gz').then(r=>
-    new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).json())
-]).then(([d,b])=>{DATA=d; BODIES=b;
-  stat.textContent=d.length+' messages indexed.';
+const canDeep=typeof DecompressionStream!=='undefined';
+if(!canDeep) note=' \\u00b7 full-text search needs a newer browser '+
+  '\\u2014 matching subject & sender only';
+// The big message-text index loads only once a search actually happens, so
+// just visiting the page costs the small subject/sender index alone.
+function loadBodies(){
+  if(bodyReq||!canDeep) return;
+  note=' \\u00b7 loading full message text\\u2026';
+  bodyReq=fetch('body-index.json.gz').then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return new Response(r.body.pipeThrough(new DecompressionStream('gzip'))).json();
+  }).then(b=>{BODIES=b; note=''; run();})
+   .catch(()=>{note=' \\u00b7 message text failed to load '+
+     '\\u2014 matching subject & sender only'; run();});
+}
+fetch('search-index.json').then(r=>{
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  return r.json();
+}).then(d=>{DATA=d;
+  stat.textContent=d.length+' messages indexed.'+note;
   const p=new URLSearchParams(location.search);   // topic chips land here
   if(p.has('q')) q.value=p.get('q');
   if(p.get('att')==='1') attonly.checked=true;
   run();})
  .catch(()=>{stat.textContent=
-   'Search needs a modern browser (DecompressionStream).';});
+   'Could not load the search index \\u2014 check the connection and reload.';});
 
 function hl(text, terms){                  // bold the matched terms (safely)
   const frag=document.createDocumentFragment(), low=text.toLowerCase();
@@ -580,27 +598,31 @@ function snipKey(sn){                       // normalize for de-duplication
   return sn.toLowerCase().replace(/[>\\s\\u2026]+/g,' ').trim();
 }
 function run(){
-  if(!BODIES) return;                       // still loading the index
+  if(!DATA.length) return;                  // subject index still loading
   const terms=q.value.toLowerCase().split(/\\s+/).filter(Boolean);
   const onlyAtt=attonly.checked;
+  if(terms.length) loadBodies();            // first real search pulls the bodies
   res.textContent='';
   if(!terms.length && !onlyAtt){
-    stat.textContent=DATA.length+' messages indexed.'; return;}
+    stat.textContent=DATA.length+' messages indexed.'+note; return;}
+  const deep=!!BODIES;
   const hits=[];
   for(let i=0;i<DATA.length;i++){
     const m=DATA[i];
     if(onlyAtt && !m[4]) continue;
-    const hay=(m[1]+' '+m[2]+' '+BODIES[i]).toLowerCase();
+    const hay=(m[1]+' '+m[2]+(deep?' '+BODIES[i]:'')).toLowerCase();
     if(terms.every(t=>hay.includes(t))) hits.push(i);
   }
   // flat list, newest first -- one dense line per matching message, date at the
   // end; clicking the line expands that message inline.
   hits.sort((a,b)=>(DATA[b][3]||'').localeCompare(DATA[a][3]||''));
+  const CAP=300;
   stat.textContent=hits.length+' match'+(hits.length==1?'':'es')+
-    (onlyAtt?' with attachments':'');
+    (onlyAtt?' with attachments':'')+
+    (hits.length>CAP?' \\u00b7 showing the newest '+CAP:'')+note;
   let shown=0;
   for(const i of hits){
-    if(shown>=300) break; shown++;
+    if(shown>=CAP) break; shown++;
     const m=DATA[i];
     const li=document.createElement('li');
     // line 1: subject = arrow + name, the whole thing toggles full <-> partial.
@@ -612,25 +634,30 @@ function run(){
     const au=document.createElement('span'); au.className='meta';   // author then date
     au.textContent=' \\u00b7 '+(m[2]||'')+' \\u00b7 '+(m[3]||'').slice(0,10); sl.appendChild(au);
     if(m[4]){const c=document.createElement('span'); c.className='clip';
-      c.title=m[4]+' attachment'+(m[4]>1?'s':''); c.textContent='\\u{1F4CE}'; sl.appendChild(c);}
+      c.title=m[4]+' attachment'+(m[4]>1?'s':''); c.textContent='\\u{1F4CE}';
+      c.setAttribute('role','img'); c.setAttribute('aria-label',c.title);
+      sl.appendChild(c);}
     const pl=document.createElement('span'); pl.className='plinks';   // permalinks (right)
     const lt=document.createElement('a'); lt.className='plink';
     lt.href=m[6]?'thread/'+m[6]+'.html#m-'+m[0]:'msg/'+m[0]+'.html';
-    lt.textContent='\\u{1F9F5}'; lt.title='Open the thread'; pl.appendChild(lt);   // thread
+    lt.textContent='\\u{1F9F5}'; lt.title='Open the thread';
+    lt.setAttribute('aria-label',lt.title); pl.appendChild(lt);   // thread
     const lr=document.createElement('a'); lr.className='plink';
     lr.href='msg/'+m[0]+'.html'; lr.textContent='\\u{1F517}';   // raw message permalink
-    lr.title='Permalink to the raw message'; pl.appendChild(lr);
+    lr.title='Permalink to the raw message';
+    lr.setAttribute('aria-label',lr.title); pl.appendChild(lr);
     sl.appendChild(pl);
     li.appendChild(sl);
     // up to 6 preview lines: the text around each match (term highlighted), or
-    // the start of the mail when the hit is only in the subject/sender.
+    // the start of the mail when the hit is only in the subject/sender. No
+    // preview before the body index has arrived (subject/sender-only phase).
     const prev=document.createElement('div'); prev.className='sprev';
-    const sns=terms.length?snippets(BODIES[i],terms,6):[];
+    const sns=(deep&&terms.length)?snippets(BODIES[i],terms,6):[];
     if(sns.length){ for(const sn of sns){ const p=document.createElement('div');
       p.className='pline'; p.appendChild(hl(sn,terms)); prev.appendChild(p); } }
-    else { const p=document.createElement('div'); p.className='pline';
+    else if(deep){ const p=document.createElement('div'); p.className='pline';
       p.textContent=(BODIES[i]||'').slice(0,200); prev.appendChild(p); }
-    li.appendChild(prev);
+    if(prev.childNodes.length) li.appendChild(prev);
     res.appendChild(li);
   }
 }
@@ -646,21 +673,41 @@ attonly.addEventListener('change',run);
 _JS_NAME = f"script.{hashlib.sha1(SCRIPT.encode()).hexdigest()[:10]}.js"
 _CSS_NAME = f"style.{hashlib.sha1(CSS.encode()).hexdigest()[:10]}.css"
 
+# Absolute site base URL (no trailing slash), e.g.
+# https://xymon-monitoring.github.io/xymon-discussion-public. Set by build()
+# from --base-url / $BASE_URL (auto-derived on GitHub Actions). When empty the
+# build stays fully portable: canonical tags and the sitemap are simply skipped.
+_BASE = ""
+
+# Tiny standalone icon (a green X) -> no /favicon.ico 404 on every page view.
+_FAVICON = ("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>"
+            "<rect width='16' height='16' rx='3' fill='#338a3a'/>"
+            "<path d='M4.5 4.5l7 7M11.5 4.5l-7 7' stroke='#fff' "
+            "stroke-width='2.2' stroke-linecap='round'/></svg>\n")
+
 
 def page(title: str, body: str, root: str = "", header: bool = True,
-         scripts: bool = True) -> str:
+         scripts: bool = True, desc: str | None = None,
+         canon: str | None = None) -> str:
     # root is "" for top-level pages and "../" for pages under msg/, so the
     # header links resolve from any depth. header=False omits the top bar (the
     # home page carries the title+search in its hero, so the bar is redundant).
     # scripts=False -> a canonical, feature-free page (no fold/copy JS).
+    # desc -> <meta name=description>; canon (site-relative path, '' = root)
+    # -> <link rel=canonical>, emitted only when an absolute base is known.
     bar = (f"<header><a href={root}index.html>Xymon Mailing List Archive</a> "
            f"<a class=hsearch href={root}index.html>search</a></header>"
            if header else "")
     js = (f"<script src='{root}{_JS_NAME}' defer></script>" if scripts else "")
+    meta = (f'<meta name=description content="{html.escape(desc)}">'
+            if desc else "")
+    if _BASE and canon is not None:
+        meta += f"<link rel=canonical href='{_BASE}/{canon}'>"
     return (
         "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"<title>{html.escape(title)}</title>"
+        f"<title>{html.escape(title)}</title>{meta}"
+        f"<link rel=icon type='image/svg+xml' href='{root}favicon.svg'>"
         f"<link rel=stylesheet href='{root}{_CSS_NAME}'>{js}</head>"
         f"<body data-root='{root}'>{bar}<main>{body}</main></body></html>"
     )
@@ -693,8 +740,9 @@ def short_date(r) -> str:
 def _clip(n: int) -> str:
     if not n:
         return ""
-    return (f" <span class=clip title='{n} attachment"
-            f"{'s' if n > 1 else ''}'>&#128206;</span>")
+    lbl = f"{n} attachment{'s' if n > 1 else ''}"
+    return (f" <span class=clip role=img title='{lbl}' "
+            f"aria-label='{lbl}'>&#128206;</span>")
 
 
 def msg_name(r) -> str:
@@ -746,6 +794,69 @@ def whom(r) -> str:
     if name:
         return _clean_name(name)
     return r["from_email"] or "(unknown)"
+
+
+def _meta_desc(r) -> str:
+    """Short plain-text summary for a message page's <meta name=description>."""
+    b = re.sub(r"\s+", " ", r["body"] or "").strip()
+    head = f"{whom(r)} · Xymon mailing list"
+    s = f"{head}: {b}" if b else head
+    return s[:157] + "…" if len(s) > 158 else s
+
+
+def _github_base() -> str:
+    """Default absolute base URL when building on GitHub Actions (Pages)."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if "/" not in repo:
+        return ""
+    owner, name = repo.split("/", 1)
+    owner = owner.lower()
+    if name.lower() == f"{owner}.github.io":     # user/org page: served at /
+        return f"https://{owner}.github.io"
+    return f"https://{owner}.github.io/{name}"
+
+
+def _write_sitemaps(out: Path, paths: list[str], chunk: int = 45000) -> None:
+    """sitemap.xml over `paths` (site-relative, '' = root). Above `chunk` URLs
+    (protocol limit 50k/file) the parts go to sitemap-N.xml behind an index."""
+    def urlset(ps):
+        return ("<?xml version='1.0' encoding='UTF-8'?>\n"
+                "<urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+                + "".join(f"<url><loc>{html.escape(f'{_BASE}/{p}')}</loc></url>"
+                          for p in ps)
+                + "</urlset>\n")
+    for old in out.glob("sitemap-*.xml"):        # stale parts from a prior run
+        old.unlink()
+    if len(paths) <= chunk:
+        (out / "sitemap.xml").write_text(urlset(paths), "utf-8")
+        return
+    parts = [paths[i:i + chunk] for i in range(0, len(paths), chunk)]
+    for n, ps in enumerate(parts, 1):
+        (out / f"sitemap-{n}.xml").write_text(urlset(ps), "utf-8")
+    (out / "sitemap.xml").write_text(
+        "<?xml version='1.0' encoding='UTF-8'?>\n"
+        "<sitemapindex xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'>"
+        + "".join(f"<sitemap><loc>{html.escape(_BASE)}/sitemap-{n}.xml"
+                  f"</loc></sitemap>" for n in range(1, len(parts) + 1))
+        + "</sitemapindex>\n", "utf-8")
+
+
+def _not_found_page() -> str:
+    """Standalone 404 (GitHub Pages serves /404.html for any missing path).
+    Self-contained: it renders at arbitrary depths, so no relative assets."""
+    home = f"{_BASE}/" if _BASE else "./"
+    return (
+        "<!DOCTYPE html><html lang=en><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Page not found – Xymon Archive</title>"
+        "<style>body{font:15px/1.5 system-ui,sans-serif;color:#1a1a1a;"
+        "background:#fafafa;margin:0}main{max-width:560px;margin:14vh auto 0;"
+        "padding:22px;text-align:center}h1{font-size:22px}a{color:#338a3a}"
+        "</style></head><body><main><h1>Page not found</h1>"
+        "<p>This page doesn't exist — the message may have moved when "
+        "the archive was rebuilt.</p>"
+        f"<p><a href='{home}'>Search the Xymon mailing list archive</a></p>"
+        "</main></body></html>")
 
 
 def render_threads(rows, att_counts=None) -> str:
@@ -854,7 +965,7 @@ document.querySelectorAll('.years .mgrid a[data-m]').forEach(function(a){
 """
 
 _THREADS_PAGE = """
-<p id=tstat class=meta>Loading threads\\u2026</p>
+<p id=tstat class=meta>Loading threads&#8230;</p>
 <ul id=tlist class=recent></ul>
 <p><button id=tmore class=tbtn hidden>Show more threads</button></p>
 <script>
@@ -891,17 +1002,19 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
     more.hidden=shown>=G.length;
   }
   more.addEventListener('click',batch);batch();
-}).catch(function(){document.getElementById('tstat').textContent='Could not load threads (needs a modern browser).';});
+}).catch(function(){document.getElementById('tstat').textContent='Could not load the thread index \\u2014 check the connection and reload.';});
 </script>
 """
 
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "9-faithful-ol"
+RENDER_VERSION = "10-seo-meta"
 
 
-def build(db: Path, out: Path) -> None:
+def build(db: Path, out: Path, base_url: str = "") -> None:
+    global _BASE
+    _BASE = (base_url or "").rstrip("/")
     conn = sqlite3.connect(db)
     conn.row_factory = sqlite3.Row
     has_tid = "thread_id" in {r[1] for r in
@@ -999,7 +1112,8 @@ def build(db: Path, out: Path) -> None:
     bars = "<h2 class=stath>Messages per year</h2><div class=bars>"
     for y in sorted(years, reverse=True):
         c = yr_count[y]
-        bars += (f"<div class=bar><a class=byr href='#y{y}'>{e(y)}</a>"
+        # the id=y<year> anchors live on the Archive tab (index-year.html)
+        bars += (f"<div class=bar><a class=byr href='index-year.html#y{y}'>{e(y)}</a>"
                  f"<span class=btrack><span class=bbar "
                  f"style='width:{round(100*c/maxy)}%'></span></span>"
                  f"<span class=bc>{c:,}</span></div>")
@@ -1053,12 +1167,24 @@ def build(db: Path, out: Path) -> None:
               .replace(_SEARCH_BLURB, "")
               .replace("__N__", str(total)))
 
+    _tab_desc = {
+        "index.html": f"Searchable archive of the Xymon (Hobbit) monitoring "
+                      f"mailing list — {total:,} messages, {span}, "
+                      f"addresses pseudonymised.",
+        "index-latest.html": "All threads of the Xymon mailing list archive, "
+                             "newest first.",
+        "index-year.html": "Browse the Xymon mailing list archive by year "
+                           "and month.",
+        "index-dashboard.html": "Activity statistics for the Xymon mailing "
+                                "list archive.",
+    }
     for lbl, href, section in _LAYOUTS:
         # the search box lives only on the Search tab, not on Archive / Stats
         mid = widget if href == "index.html" else ""
         (out / href).write_text(
             page("Xymon Archive", hero + tabs(lbl) + mid + section,
-                 header=False), "utf-8")
+                 header=False, desc=_tab_desc.get(href),
+                 canon="" if href == "index.html" else href), "utf-8")
 
     # thread id per message (reply links + shared distinctive subject), so the
     # client can group search hits under their thread.
@@ -1210,7 +1336,11 @@ def build(db: Path, out: Path) -> None:
         nav = (f"<p class=meta>{len(rows)} messages{mbox_link} &middot; "
                f"<a href='index.html'>&larr; index</a></p>")
         mbody = f"<h1>{e(m)}</h1>{nav}{content}{nav}"
-        (out / f"{m}.html").write_text(page(f"Xymon {m}", mbody), "utf-8")
+        (out / f"{m}.html").write_text(
+            page(f"Xymon {m}", mbody,
+                 desc=f"Xymon mailing list archive, {m}: "
+                      f"{len(rows)} messages.",
+                 canon=f"{m}.html"), "utf-8")
         # accordion fragment (loaded by the month index); msg/<id>.html links
         # resolve when the fragment is injected at the site root.
         (out / "frag" / f"{m}.html").write_text(
@@ -1291,8 +1421,9 @@ def build(db: Path, out: Path) -> None:
                 f"{'<br>Message-Id: ' + e(r['msgid']) if r['msgid'] else ''}</p>"
                 f"{mbody}{matts}</div>")
             (out / "msg" / f"{anchor}.html").write_text(
-                page(e(r["subject"]) or "message", msg_html, root="../",
-                     scripts=False), "utf-8")
+                page(r["subject"] or "message", msg_html, root="../",
+                     scripts=False, desc=_meta_desc(r),
+                     canon=f"msg/{anchor}.html"), "utf-8")
         tbody = (f"<div class=thread>"
                  f"<h1>{e(head['subject']) or '(no subject)'} "
                  f"<button class=copy type=button data-href='thread/{e(tid)}.html'"
@@ -1301,7 +1432,11 @@ def build(db: Path, out: Path) -> None:
                  f"{'s' if len(members) != 1 else ''} in this thread</p>"
                  + "".join(blocks) + "</div>")
         (out / "thread" / f"{tid}.html").write_text(
-            page(e(head["subject"]) or "thread", tbody, root="../"), "utf-8")
+            page(head["subject"] or "thread", tbody, root="../",
+                 desc=f"Xymon mailing list thread, {len(members)} message"
+                      f"{'s' if len(members) != 1 else ''}, "
+                      f"{(head['date_iso'] or '')[:10]}.",
+                 canon=f"thread/{tid}.html"), "utf-8")
         nth += 1
     print(f"{'incremental' if incremental else 'full'} render: "
           f"{nth}/{len(bythread)} thread pages")
@@ -1315,6 +1450,23 @@ def build(db: Path, out: Path) -> None:
         json.dumps({"threads": new_threads, "assets": [_JS_NAME, _CSS_NAME]},
                    separators=(",", ":")), "utf-8")
 
+    # ---- discoverability scaffolding: favicon, custom 404, robots, sitemap.
+    # The sitemap and robots' Sitemap line need absolute URLs, so they appear
+    # only when a base URL is known (CI); the rest is emitted unconditionally.
+    (out / "favicon.svg").write_text(_FAVICON, "utf-8")
+    (out / "404.html").write_text(_not_found_page(), "utf-8")
+    _prefix = urlsplit(_BASE).path if _BASE else ""
+    robots = f"User-agent: *\nDisallow: {_prefix}/frag/\n"
+    if _BASE:
+        robots += f"Sitemap: {_BASE}/sitemap.xml\n"
+    (out / "robots.txt").write_text(robots, "utf-8")
+    if _BASE:
+        _write_sitemaps(out, (
+            [""] + [h for _, h, _ in _LAYOUTS if h != "index.html"]
+            + [f"{m}.html" for m in months]
+            + [f"thread/{t}.html" for t in sorted(bythread)]
+            + [f"msg/{row[0]}.html" for row in sidx]))
+
     conn.close()
     print(f"Generated site in {out}/ ({len(months)} months)")
 
@@ -1323,8 +1475,13 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Generate static Xymon mirror")
     ap.add_argument("--db", default="archive.db", type=Path)
     ap.add_argument("--out", default="site", type=Path)
+    ap.add_argument("--base-url",
+                    default=os.environ.get("BASE_URL") or _github_base(),
+                    help="absolute site URL; enables sitemap.xml + canonical "
+                         "tags (defaults to $BASE_URL, or the GitHub Pages "
+                         "URL when building in Actions)")
     args = ap.parse_args()
-    build(args.db, args.out)
+    build(args.db, args.out, args.base_url)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,21 @@ console.log('1) features present in script.js');
  'function loadThread', 'function hlTerms', 'function mergeAdjacent']
   .forEach(f => assert(script.includes(f), 'script.js defines ' + f));
 
+console.log('1a) page chrome: favicon, labelled search box, no leaked escapes, live year bars');
+{
+  const home = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
+  assert(home.includes('favicon.svg'), 'index.html links the favicon');
+  assert(home.includes('aria-label="Search the archive"'), 'search input is labelled');
+  const threads = fs.readFileSync(path.join(SITE, 'index-latest.html'), 'utf8');
+  assert(!threads.split('<script>')[0].includes('\\u2026'),
+    'Threads page text has no literal \\u2026 escape');
+  const dash = fs.readFileSync(path.join(SITE, 'index-dashboard.html'), 'utf8');
+  assert(dash.includes("href='index-year.html#y"),
+    'Stats year bars link to the Archive page anchors');
+  ['robots.txt', '404.html', 'favicon.svg'].forEach(f =>
+    assert(fs.existsSync(path.join(SITE, f)), f + ' is generated'));
+}
+
 console.log('1b) attribution colon is not split into the quote fold (NBSP glue)');
 {
   // adjacent block elements give no separating space in textContent, so a French
