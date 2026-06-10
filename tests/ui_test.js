@@ -34,7 +34,8 @@ function foldDoc(tid) {
 
 console.log('1) features present in script.js');
 ['function foldQuotes', 'function contentDedup', 'function loadMsg',
- 'function loadThread', 'function hlTerms', 'function mergeAdjacent']
+ 'function loadThread', 'function hlTerms', 'function mergeAdjacent',
+ 'function lineEl']
   .forEach(f => assert(script.includes(f), 'script.js defines ' + f));
 
 console.log('1a) page chrome: favicon, labelled search box, no leaked escapes, live year bars');
@@ -141,6 +142,31 @@ const missing = process.env.FULL === '1'
   dom.window.close();
 });
 
+console.log('3b) one .sline row grammar on every surface (JS lineEl == month page markup)');
+{
+  const monthFile = fs.readdirSync(SITE)
+    .find(f => /^\d{4}-[A-Z][a-z]+\.html$/.test(f));
+  if (!monthFile) skip('no month page in site/');
+  else {
+    const mdom = new JSDOM(fs.readFileSync(path.join(SITE, monthFile), 'utf8'));
+    const rows = [...mdom.window.document.querySelectorAll('.mlist li .sline')];
+    assert(rows.length > 0, monthFile + ': month rows use the .sline grammar');
+    const srv = rows.find(s => !s.querySelector('.clip')) || rows[0];
+    const withClip = !!srv.querySelector('.clip');
+    setGlobals(new JSDOM('<!doctype html><body>', { url: 'https://x/' }));
+    const js = lineEl({ subject: 'S', author: 'A', when: '2026-01-01',
+      att: withClip ? 1 : 0, mid: 'm1', href: 'msg/m1.html',
+      threadHref: 'thread/t1.html#m-m1', msgHref: 'msg/m1.html' })
+      .querySelector('.sline');
+    const sig = el => [el.className,
+      ...[...el.querySelectorAll('*')].map(x => x.tagName + '.' + x.className)]
+      .join('|');
+    assert(sig(js) === sig(srv),
+      'lineEl and the server-side month row share one structure (' + sig(js) + ')');
+    mdom.window.close();
+  }
+}
+
 console.log('4) search renders title + preview + expand toggle, and expands body-only + highlights');
 {
   const home = fs.readFileSync(path.join(SITE, 'index.html'), 'utf8');
@@ -153,11 +179,12 @@ console.log('4) search renders title + preview + expand toggle, and expands body
     global.fetch = () => Promise.resolve({ text: () => Promise.resolve(
       "<div class=msg><h1>S</h1><p class=meta>A</p><div class=pt><pre>the cert expired here</pre></div></div>") });
     global.window.fetch = global.fetch;
-    eval(SC);  // handler + loadMsg + hlTerms bound to this document
-    const DATA = [["m1", "Cert issue", "Alice", "2026-01-10", 0, "t1", "t1"]];
-    const BODIES = ["please renew the cert it expired"];
-    eval(sjs.replace("let DATA=[], BODIES=null;",
-      "let DATA=" + JSON.stringify(DATA) + ", BODIES=" + JSON.stringify(BODIES) + ";") + "\nrun();");
+    eval(SC);  // handler + loadMsg + hlTerms + lineEl bound to this document
+    eval(sjs); // defines the search page script + its window.__searchTest seam
+    window.__searchTest.set(
+      [["m1", "Cert issue", "Alice", "2026-01-10 09:00", 0, "t1", "t1"]],
+      ["please renew the cert it expired"]);
+    window.__searchTest.run();
     const li = document.querySelector('#res>li');
     assert(li && li.querySelector('.tsub.xpand'), 'result line: subject is an expand toggle');
     assert(li && li.querySelector('.sprev .pline mark'), 'result line: preview highlights the term');

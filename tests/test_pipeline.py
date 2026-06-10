@@ -669,10 +669,6 @@ def test_stable_id_survives_unencodable_msgid():
     assert threads.stable_id(weird, 12) == threads.stable_id(weird, 12)
 
 
-def test_order_is_shared_between_renderer_and_thread_anchor():
-    assert generate._sortkey is threads.order
-
-
 def test_obfuscate_bounded_gunzip_contract():
     import gzip as _gz
 

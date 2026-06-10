@@ -41,22 +41,22 @@ input:focus,select:focus,textarea:focus{outline:2px solid #338a3a;outline-offset
 .meta{color:#666;font-size:13px}
 pre{white-space:pre-wrap;background:#fff;border:1px solid #e3e3e3;padding:14px;
     border-radius:6px;overflow:auto}
-.cnt{color:#666;font-size:12px}
 .mgrid{display:flex;flex-wrap:wrap;gap:4px 16px;margin:4px 0 8px}
 .mgrid a{text-decoration:none} .mgrid a.mgactive{font-weight:600;text-decoration:underline}
 .mgrid span{color:#767676}
 .mpanel{margin:0 0 16px;padding:6px 0 0;border-top:1px solid #e3e3e3} .mpanel ul{margin:6px 0}
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:10px;
     color:#fff;background:#888;margin-right:6px;vertical-align:1px}
-.badge.github{background:#24292f} .badge.list,.badge.imap{background:#338a3a}
+.badge.github{background:#24292f} .badge.list{background:#338a3a}
 .badge.inbox{background:#2e7d32}
 .msg{background:#fff;border:1px solid #e3e3e3;border-radius:8px;padding:8px 20px 16px}
-.thread>p:last-child{display:none}      /* drop the old "<- index" footer on cached pages */
 .tmsg{margin:14px 0}
 .tmsg>summary{cursor:pointer;padding:4px 0;list-style:none}
 .tmsg>summary::-webkit-details-marker{display:none}
-.tmsg>summary::before{content:'\\25B8\\00A0';color:#338a3a;font-size:18px;vertical-align:-2px}
-.tmsg[open]>summary::before{content:'\\25BE\\00A0'}
+/* one fold arrow everywhere: thread-page summaries and .sline toggles */
+.tmsg>summary::before,.xpand::before{content:'\\25B8\\00A0';color:#338a3a;
+    font-size:18px;vertical-align:-2px}
+.tmsg[open]>summary::before,.xpand.thopen::before{content:'\\25BE\\00A0'}
 /* same box for both body types (plain text .pt and HTML .md) */
 .tmsg .pt,.tmsg .md{background:#fff;border:1px solid #e3e3e3;
     border-radius:6px;padding:12px 14px;margin-top:4px}
@@ -87,10 +87,6 @@ ul.thread li{margin:4px 0}
 .att ul{margin:6px 0 0} .att li{margin:3px 0}
 .hsearch{float:right;font-size:13px;opacity:.85}
 .clip{font-size:12px;opacity:.75;cursor:default}
-.tnav{display:flex;justify-content:space-between;gap:16px;font-size:13px;
-    margin:10px 0;padding:6px 0;border-top:1px solid #eee;border-bottom:1px solid #eee}
-.tnav a{text-decoration:none;color:#338a3a} .tnav .nx{margin-left:auto;text-align:right}
-.tnav .lbl{color:#999}
 pre a{color:#338a3a}
 #q{width:100%;padding:9px 11px;font-size:15px;box-sizing:border-box;
     border:1px solid #ccc;border-radius:6px}
@@ -112,10 +108,6 @@ pre a{color:#338a3a}
 .hero .tag{font-size:16px;opacity:.92;margin:10px 0 0;font-weight:300}
 .hero .meta{color:#c8e6c9;font-size:12.5px;margin:14px 0 0;letter-spacing:.3px}
 .hero .meta b{color:#fff;font-weight:600}
-#hq{width:100%;max-width:560px;margin:16px auto 4px;display:block;
-    padding:12px 16px;font-size:16px;border:1px solid #ccc;border-radius:9px}
-.hres{list-style:none;padding:0;max-width:620px;margin:6px auto}
-.hres li{margin:6px 0}
 .altlinks{text-align:center;font-size:13px;color:#666;margin:6px 0 18px}
 .bars{margin:0}
 .bar{display:grid;grid-template-columns:46px 1fr 60px;align-items:center;
@@ -134,13 +126,7 @@ pre a{color:#338a3a}
 .tbtn{font:inherit;color:#338a3a;background:#e9f1e9;border:1px solid #cfe0cf;
     border-radius:5px;padding:6px 14px;cursor:pointer}
 .tbtn:hover{background:#dcebdc}
-.thtoggle{cursor:pointer}
-.thtoggle:hover{color:#338a3a}
-.thtoggle::before{content:'\\25B8\\00A0';color:#338a3a;font-size:18px;vertical-align:-2px}
-.thtoggle.thopen::before{content:'\\25BE\\00A0'}
-.xpand{cursor:pointer}                        /* expand-in-place toggle (search/archive) */
-.xpand::before{content:'\\25B8\\00A0';color:#338a3a;font-size:18px;vertical-align:-2px}
-.xpand.thopen::before{content:'\\25BE\\00A0'}
+.xpand{cursor:pointer}    /* expand-in-place toggle (search/threads/archive) */
 .mlist{list-style:none;padding-left:2px}      /* archive flat lists: no bullets */
 .mlist li{margin:4px 0}
 .thmsgs{margin:4px 0 10px 6px;padding-left:16px;border-left:2px solid #d9e6d9;
@@ -509,10 +495,44 @@ function loadMsg(box,mid,terms){
   inject(box,'msg/'+mid+'.html',{sel:'.msg',strip:'h1,p.meta',
     fallback:'msg/'+mid+'.html',terms:terms});
 }
-// a link marked .xpand[data-mid] expands that single MESSAGE inline (search/archive);
-// thread links navigate normally to the thread page.
+// ONE list row for every surface -- search results and the Threads tab call
+// this; the month pages emit the same markup server-side (generate._msg_line;
+// a ui_test asserts the contract). Grammar:
+//   [subject toggle] [· author · when [· N messages]] [clip] [thread,permalink]
+function lineEl(o){
+  var li=document.createElement('li');
+  var sl=document.createElement('div'); sl.className='sline';
+  var a=document.createElement('a'); a.className='tsub xpand';
+  if(o.mid) a.setAttribute('data-mid',o.mid);
+  else if(o.tid) a.setAttribute('data-tid',o.tid);
+  a.href=o.href; a.textContent=o.subject||'(no subject)';
+  sl.appendChild(a);
+  var au=document.createElement('span'); au.className='meta';
+  au.textContent=' \\u00b7 '+(o.author||'')+' \\u00b7 '+(o.when||'')+
+    (o.count?' \\u00b7 '+o.count+' message'+(o.count>1?'s':''):'');
+  sl.appendChild(au);
+  if(o.att){var c=document.createElement('span'); c.className='clip';
+    c.title=o.att+' attachment'+(o.att>1?'s':''); c.textContent='\\u{1F4CE}';
+    c.setAttribute('role','img'); c.setAttribute('aria-label',c.title);
+    sl.appendChild(c);}
+  var pl=document.createElement('span'); pl.className='plinks';
+  if(o.threadHref){var lt=document.createElement('a'); lt.className='plink';
+    lt.href=o.threadHref; lt.textContent='\\u{1F9F5}';
+    lt.title='Open the thread'; lt.setAttribute('aria-label',lt.title);
+    pl.appendChild(lt);}
+  if(o.msgHref){var lr=document.createElement('a'); lr.className='plink';
+    lr.href=o.msgHref; lr.textContent='\\u{1F517}';
+    lr.title='Permalink to the raw message';
+    lr.setAttribute('aria-label',lr.title); pl.appendChild(lr);}
+  sl.appendChild(pl);
+  li.appendChild(sl);
+  return li;
+}
+// a link marked .xpand expands its content inline: data-mid -> that single
+// MESSAGE (search/archive), data-tid -> the whole THREAD (Threads tab).
 document.addEventListener('click',function(e){
-  var a=e.target.closest&&e.target.closest('.xpand[data-mid]'); if(!a) return;
+  var a=e.target.closest&&e.target.closest('.xpand[data-mid],.xpand[data-tid]');
+  if(!a) return;
   e.preventDefault();
   var host=a.closest('li')||a.parentNode;
   var prev=host.querySelector(':scope > .sprev');   // search preview (hide while full)
@@ -521,9 +541,10 @@ document.addEventListener('click',function(e){
     a.classList.toggle('thopen',open); if(prev) prev.hidden=open; return; }
   box=document.createElement('div'); box.className='thmsgs'; host.appendChild(box);
   a.classList.add('thopen'); if(prev) prev.hidden=true;
-  var qel=document.getElementById('q');   // on the search page -> highlight the terms
-  var terms=qel?qel.value.toLowerCase().split(/\\s+/).filter(Boolean):[];
-  loadMsg(box,a.getAttribute('data-mid'),terms);
+  if(a.hasAttribute('data-tid'))
+    loadThread(box,a.getAttribute('data-tid'),a.href);
+  else
+    loadMsg(box,a.getAttribute('data-mid'),curTerms());
 });
 // collapse runs of >2 consecutive <br> (typed blank lines) down to 2 -- keeps
 // paragraph spacing (<br><br>) but trims a message padded with many empty lines.
@@ -614,6 +635,9 @@ function snippets(text, terms, max){        // up to `max` distinct hit windows
 }
 function run(){
   if(!DATA.length) return;                  // subject index still loading
+  // lineEl lives in the deferred script.js; if the index won the race against
+  // it (cached fetch during parse), retry shortly instead of half-rendering.
+  if(typeof lineEl!=='function'){setTimeout(run,40);return;}
   const terms=q.value.toLowerCase().split(/\\s+/).filter(Boolean);
   const onlyAtt=attonly.checked;
   if(terms.length) loadBodies();            // first real search pulls the bodies
@@ -639,30 +663,12 @@ function run(){
   for(const i of hits){
     if(shown>=CAP) break; shown++;
     const m=DATA[i];
-    const li=document.createElement('li');
-    // line 1: subject = arrow + name, the whole thing toggles full <-> partial.
-    const sl=document.createElement('div'); sl.className='sline';
-    const a=document.createElement('a'); a.className='tsub xpand'; a.setAttribute('data-mid',m[0]);
-    a.href='msg/'+m[0]+'.html';
-    a.textContent=m[1]||'(no subject)';
-    sl.appendChild(a);
-    const au=document.createElement('span'); au.className='meta';   // author then date
-    au.textContent=' \\u00b7 '+(m[2]||'')+' \\u00b7 '+(m[3]||'').slice(0,10); sl.appendChild(au);
-    if(m[4]){const c=document.createElement('span'); c.className='clip';
-      c.title=m[4]+' attachment'+(m[4]>1?'s':''); c.textContent='\\u{1F4CE}';
-      c.setAttribute('role','img'); c.setAttribute('aria-label',c.title);
-      sl.appendChild(c);}
-    const pl=document.createElement('span'); pl.className='plinks';   // permalinks (right)
-    const lt=document.createElement('a'); lt.className='plink';
-    lt.href=m[6]?'thread/'+m[6]+'.html#m-'+m[0]:'msg/'+m[0]+'.html';
-    lt.textContent='\\u{1F9F5}'; lt.title='Open the thread';
-    lt.setAttribute('aria-label',lt.title); pl.appendChild(lt);   // thread
-    const lr=document.createElement('a'); lr.className='plink';
-    lr.href='msg/'+m[0]+'.html'; lr.textContent='\\u{1F517}';   // raw message permalink
-    lr.title='Permalink to the raw message';
-    lr.setAttribute('aria-label',lr.title); pl.appendChild(lr);
-    sl.appendChild(pl);
-    li.appendChild(sl);
+    // the shared site-wide list row (script.js); date slice -- the full [3]
+    // carries time so same-day results sort chronologically.
+    const li=lineEl({subject:m[1],author:m[2],when:(m[3]||'').slice(0,10),
+      att:m[4],mid:m[0],href:'msg/'+m[0]+'.html',
+      threadHref:m[6]?'thread/'+m[6]+'.html#m-'+m[0]:'msg/'+m[0]+'.html',
+      msgHref:'msg/'+m[0]+'.html'});
     // up to 6 preview lines: the text around each match (term highlighted), or
     // the start of the mail when the hit is only in the subject/sender. No
     // preview before the body index has arrived (subject/sender-only phase).
@@ -678,6 +684,9 @@ function run(){
 }
 let t; q.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(run,200);});
 attonly.addEventListener('change',run);
+// test seam (inert in production): ui_test drives the search through this
+// instead of patching the script's source text.
+window.__searchTest={set:(d,b)=>{DATA=d;BODIES=b;},run:run};
 </script>
 """
 
@@ -732,11 +741,6 @@ def e(s: str | None) -> str:
     return html.escape(s or "")
 
 
-# one chronology everywhere: the same ordering threads.thread_ids uses to
-# pick a thread's id anchor, so display roots and stable ids cannot diverge.
-_sortkey = threads.order
-
-
 def short_date(r) -> str:
     """Compact list date: 2024-07-05 12:32 (full original kept on msg page)."""
     iso = r["date_iso"]
@@ -766,18 +770,35 @@ def msg_name(r) -> str:
 
 
 def _xp(r) -> str:
-    """Make the whole subject link an expand-in-place MESSAGE toggle (arrow + name);
-    the global handler injects msg/<id>.html inline. href is the no-JS fallback."""
-    return f"class=xpand data-mid='{msg_name(r)}' href='msg/{msg_name(r)}.html'"
+    """Make the whole subject link an expand-in-place MESSAGE toggle (arrow +
+    name) in the shared .sline grammar (same classes as script.js lineEl);
+    the global handler injects msg/<id>.html inline. href is the no-JS
+    fallback."""
+    return (f"class='tsub xpand' data-mid='{msg_name(r)}' "
+            f"href='msg/{msg_name(r)}.html'")
 
 
 def _msg_line(r, att_counts) -> str:
-    """One message list line (subject toggle + attachment clip + author/date)
-    -- the shared <li> opening for the month flat list and the thread tree."""
-    return (f"<li><a {_xp(r)}>"
+    """One message list row in the site-wide .sline grammar -- the SAME
+    structure script.js's lineEl() builds for search results and the Threads
+    tab (a ui_test asserts the contract): subject expand-toggle, then
+    "· author · date", attachment clip, and right-aligned thread/permalink
+    icons. Month pages show date+time (within one month, time IS the order);
+    the JS surfaces slice to the date."""
+    mid = msg_name(r)
+    tid = r["thread_id"] if "thread_id" in r.keys() else None
+    thref = f"thread/{tid}.html#m-{mid}" if tid else f"msg/{mid}.html"
+    return (f"<li><div class=sline><a {_xp(r)}>"
             f"{e(r['subject']) or '(no subject)'}</a>"
-            f"{_clip(att_counts.get(r['msgid'], 0))} "
-            f"<span class=meta>{e(whom(r))} &middot; {short_date(r)}</span>")
+            f"<span class=meta> &middot; {e(whom(r))} &middot; "
+            f"{short_date(r)}</span>"
+            f"{_clip(att_counts.get(r['msgid'], 0))}"
+            f"<span class=plinks>"
+            f"<a class=plink href='{thref}' title='Open the thread' "
+            f"aria-label='Open the thread'>&#129525;</a>"
+            f"<a class=plink href='msg/{mid}.html' title='Permalink to the "
+            f"raw message' aria-label='Permalink to the raw message'>"
+            f"&#128279;</a></span></div>")
 
 
 def _bar_row(cls: str, label: str, count: int, peak: int) -> str:
@@ -876,57 +897,6 @@ def _not_found_page() -> str:
         "</main></body></html>")
 
 
-def render_threads(rows, att_counts=None) -> str:
-    """Render a month's rows as a nested reply tree (Pipermail thread view).
-
-    A message links under its ``in_reply_to`` parent when that parent is in the
-    same month; otherwise it is a thread root (covers cross-month replies and
-    missing parents). Ordered by date within each level; a per-branch seen-set
-    guards against malformed reply cycles.
-    """
-    att_counts = att_counts or {}
-    by_msgid = {r["msgid"]: r for r in rows if r["msgid"]}
-    children: dict[str, list] = defaultdict(list)
-    has_parent = set()
-    for r in rows:
-        parent = r["in_reply_to"]
-        if parent and parent in by_msgid and parent != r["msgid"]:
-            children[parent].append(r)
-            has_parent.add(r["id"])
-
-    # Define threads by union-find over reply links AND a shared distinctive
-    # subject (so a subject-changed reply and its scattered siblings end up in
-    # one tree -- not split). threads.components() is the one shared grouping
-    # (also used by the search-index pass and the private thread_ids).
-    comp = threads.components(rows)
-
-    # One display root per thread (earliest true root); attach the component's
-    # other roots (missing/foreign parents) under it so the thread is one tree.
-    roots = []
-    for members in comp.values():
-        in_roots = sorted((m for m in members if m["id"] not in has_parent),
-                          key=_sortkey)
-        if not in_roots:                       # cycle: fall back to earliest
-            in_roots = [min(members, key=_sortkey)]
-        primary = in_roots[0]
-        roots.append(primary)
-        if primary["msgid"]:
-            for m in in_roots[1:]:
-                children[primary["msgid"]].append(m)
-
-    def node(r, seen: frozenset) -> str:
-        out = _msg_line(r, att_counts)
-        kids = sorted(children.get(r["msgid"], ()), key=_sortkey)
-        if kids and r["id"] not in seen:
-            seen = seen | {r["id"]}
-            out += "<ul>" + "".join(node(k, seen) for k in kids) + "</ul>"
-        return out + "</li>"
-
-    roots.sort(key=_sortkey)
-    return ("<ul class=thread>"
-            + "".join(node(r, frozenset()) for r in roots) + "</ul>")
-
-
 _ARCHIVE_JS = """
 <script>
 function loadFrag(panel, frag){
@@ -964,25 +934,20 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
     return x<y?1:(x>y?-1:0);});
   document.getElementById('tstat').textContent=G.length.toLocaleString()+' threads';
   var shown=0,B=50,list=document.getElementById('tlist'),more=document.getElementById('tmore');
-  var load=window.loadThread;   // shared inline-thread loader (defined in script.js)
   function addThread(idx){
+    // the shared site-wide list row (script.js lineEl); expansion is handled
+    // by the global .xpand dispatcher (data-tid -> whole thread inline).
     var f=D[idx[0]],last=(D[idx[idx.length-1]][3]||'').slice(0,10),n=idx.length,tid=f[6];
-    var fb=tid?'thread/'+tid+'.html':'msg/'+f[0]+'.html',loaded=false;
-    var li=document.createElement('li');
-    var tg=document.createElement('div');tg.className='thtoggle';
-    tg.appendChild(document.createTextNode(f[1]||'(no subject)'));
-    var sm=document.createElement('span');sm.className='meta';
-    sm.textContent=' \\u00b7 '+(f[2]||'')+' \\u00b7 '+last+
-      ' \\u00b7 '+n+' message'+(n>1?'s':'');
-    tg.appendChild(sm);
-    var box=document.createElement('div');box.className='thmsgs';box.hidden=true;
-    tg.addEventListener('click',function(){
-      this.classList.toggle('thopen');box.hidden=!box.hidden;
-      if(!box.hidden&&!loaded){loaded=true;load(box,tid,fb);}
-    });
-    li.appendChild(tg);li.appendChild(box);list.appendChild(li);
+    var att=0; for(var j=0;j<idx.length;j++) att+=D[idx[j]][4]||0;
+    var fb=tid?'thread/'+tid+'.html':'msg/'+f[0]+'.html';
+    list.appendChild(lineEl({subject:f[1],author:f[2],when:last,count:n,
+      att:att,tid:tid||null,mid:tid?null:f[0],href:fb,
+      threadHref:tid?fb:null}));
   }
   function batch(){
+    // lineEl lives in the deferred script.js; retry briefly if the index
+    // fetch won the race against it.
+    if(typeof lineEl!=='function'){setTimeout(batch,40);return;}
     var end=Math.min(shown+B,G.length);
     for(;shown<end;shown++) addThread(G[shown]);
     more.hidden=shown>=G.length;
@@ -1240,7 +1205,10 @@ def _write_search_indexes(conn, out: Path, has_tid, att_counts,
         sidx.append([
             msg_name(r), r["subject"] or "",
             whom(r),
-            (r["date_iso"] or "")[:10], att_counts.get(r["msgid"], 0),
+            # [3] "YYYY-MM-DD HH:MM": lists display the date slice; the full
+            # string refines same-day ordering (lexicographic = chronologic)
+            (r["date_iso"] or "")[:16].replace("T", " "),
+            att_counts.get(r["msgid"], 0),
             tid_of[r["id"]],                       # [5] grouping key (per build)
             r["thread_id"] if has_tid else ""])    # [6] stable thread/<tid> link
         b = (r["body"] or "").replace("\r\n", "\n").replace("\r", "\n")
