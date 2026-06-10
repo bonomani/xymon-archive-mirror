@@ -251,9 +251,15 @@ function foldQuotes(root){
       try{ rg.setStartAfter(a); rg.setEndBefore(b); gap=rg.toString(); }catch(e){ continue; }
       // merge if nothing real sits between -- whitespace, OR just an attribution /
       // header / separator line (it belongs to the next quote). A real reply -> keep.
-      var g=gap.replace(/[\\s\\ufeff\\u200b]/g,'');
-      if(g!=='' && !(gap.replace(/\\s+/g,' ').trim().length<150 &&
-                     (ATTR.test(gap)||HDR.test(gap)||ORIG.test(gap)))) continue;
+      // The attribution test needs the SHAPE, not the vocabulary: a real sentence
+      // like "you wrote a slightly differing set of CVE-IDs:" contains "wrote",
+      // sits under 150 chars, and ATTR.test() swallowed it into the fold. Only a
+      // gap that STARTS with an attribution opener or ENDS with the "wrote:" verb
+      // form is a quote lead-in.
+      var ATTRGAP=/^[>\\s]*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\\b[\\s\\S]*:$|(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto|a [eé]crit)\\s*:$/i;
+      var g=gap.replace(/[\\s\\ufeff\\u200b]/g,''), gt=gap.replace(/\\s+/g,' ').trim();
+      if(g!=='' && !(gt.length<150 &&
+                     (ATTRGAP.test(gt)||HDR.test(gap)||ORIG.test(gap)))) continue;
       a.appendChild(rg.extractContents());       // pull the gap (attribution/ws) into a
       while(b.firstChild){                        // then b's content (minus summary)
         if(b.firstChild.tagName==='SUMMARY'){ b.removeChild(b.firstChild); continue; }
@@ -980,7 +986,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "18-att-dedup"
+RENDER_VERSION = "19-attr-shape"
 
 
 _CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')

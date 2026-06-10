@@ -98,6 +98,33 @@ console.log('1b2) blockquote fold never hollows a pure-quote message');
     'message with own text still folds its quote');
 }
 
+console.log('1b3) mergeAdjacent does not swallow a sentence that merely contains "wrote"');
+{
+  // a real sentence between two quote folds ("...you wrote a slightly
+  // differing set of CVE-IDs:") matched ATTR by vocabulary and was merged
+  // into the fold. Only attribution-SHAPED gaps (opener-led, or ending in
+  // "wrote:") may merge; genuine attributions still do.
+  const dupA = 'first quoted passage about the security advisory identifiers listed in detail';
+  const dupB = 'second quoted passage with the changelog entries and the package upload notes';
+  const mk = body => '<div class="tmsg"><div class="pt">' + body + '</div></div>';
+  const prior = mk('<pre>' + dupA + '\n\n' + dupB + '</pre>');
+  const reply = mk('<pre>My take below.</pre><blockquote><pre>' + dupA +
+    '</pre></blockquote><pre>But in the docs you wrote a slightly differing set of IDs:</pre>' +
+    '<blockquote><pre>' + dupB + '</pre></blockquote>');
+  const attrib = mk('<pre>Reply here.</pre><blockquote><pre>' + dupA +
+    '</pre></blockquote><pre>On Tue, Jul 23, 2019, Japheth Cleaver wrote:</pre>' +
+    '<blockquote><pre>' + dupB + '</pre></blockquote>');
+  const d = new JSDOM('<!doctype html><body data-root="./">' + prior + reply + attrib +
+    '</body>', { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const msgs = document.querySelectorAll('.tmsg .pt');
+  assert(visText(msgs[1]).includes('you wrote a slightly differing'),
+    'real sentence containing "wrote" stays visible between folds');
+  assert(!visText(msgs[2]).includes('Japheth Cleaver wrote'),
+    'genuine attribution line still merges into the fold');
+}
+
 console.log('1d) thread page dedupes re-attached identical content');
 {
   // Outlook re-attaches the quoted message's inline images under generic
