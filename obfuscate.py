@@ -29,7 +29,6 @@ import os
 import quopri
 import tarfile
 import zipfile
-import zlib
 from collections import Counter
 import re
 import sqlite3
@@ -37,6 +36,7 @@ import sys
 from pathlib import Path
 
 import mailstore                       # decode_payload + apply_fast_pragmas
+import webfetch                        # gunzip_bounded (shared zip-bomb guard)
 
 _DEFAULT = "xymon-archive-public-fallback-salt"   # weak; set a real one
 LIST_DOMAIN = "xymon.com"             # public list/infra address -> kept as-is
@@ -371,19 +371,15 @@ _ARCH_MAX_RATIO = 1000
 
 
 def _bounded_gunzip(data: bytes, limit: int):
-    """Gunzip but abort (return None) as soon as output would exceed `limit`, so a
-    gzip bomb can't be fully expanded into memory before the size check."""
+    """Gunzip but abort (return None) as soon as output would exceed `limit`.
+
+    The algorithm is webfetch.gunzip_bounded -- the ONE shared zip-bomb guard
+    -- adapted to this pipeline's contract: an over-limit or corrupt archive
+    is "unsafe, skip it" (None), never a crash mid-publish."""
     if limit < 0:
         return None
     try:
-        d = zlib.decompressobj(31)                # 16 + MAX_WBITS -> gzip framing
-        out = bytearray(d.decompress(data, limit + 1))
-        while d.unconsumed_tail and len(out) <= limit:
-            out += d.decompress(d.unconsumed_tail, limit + 1 - len(out))
-        if len(out) > limit:
-            return None
-        out += d.flush()
-        return None if len(out) > limit else bytes(out)
+        return webfetch.gunzip_bounded(data, limit)
     except Exception:  # noqa: BLE001
         return None
 

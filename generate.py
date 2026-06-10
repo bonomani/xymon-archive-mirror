@@ -732,8 +732,9 @@ def e(s: str | None) -> str:
     return html.escape(s or "")
 
 
-def _sortkey(r):
-    return (r["date_iso"] is None, r["date_iso"] or "", r["id"])
+# one chronology everywhere: the same ordering threads.thread_ids uses to
+# pick a thread's id anchor, so display roots and stable ids cannot diverge.
+_sortkey = threads.order
 
 
 def short_date(r) -> str:
@@ -760,16 +761,8 @@ def msg_name(r) -> str:
     """
     mid = r["msgid"]
     if mid:
-        return hashlib.sha1(mid.encode("utf-8", "replace")).hexdigest()[:16]
+        return threads.stable_id(mid, 16)
     return f"x{r['id']}"
-
-
-def _href(r, root: str = "") -> str:
-    """Link target for a message line (root-relative): its thread page anchored
-    to the message when a stable thread_id exists, else the message permalink."""
-    tid = r["thread_id"] if "thread_id" in r.keys() else None
-    return (f"{root}thread/{tid}.html#m-{msg_name(r)}" if tid
-            else f"{root}msg/{msg_name(r)}.html")
 
 
 def _xp(r) -> str:

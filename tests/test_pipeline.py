@@ -652,6 +652,38 @@ def test_webfetch_allowlist_rejects_unsafe_urls():
         assert raised, bad
 
 
+def test_stable_id_is_the_one_permalink_hash():
+    import hashlib as _h
+    mid = "<abc@example.org>"
+    # thread/<tid> (12) and msg/<id> (16) both derive from threads.stable_id
+    assert threads.stable_id(mid, 12) == threads._tid(mid)
+    assert threads.stable_id(mid, 16) == _h.sha1(
+        mid.encode()).hexdigest()[:16]
+
+
+def test_stable_id_survives_unencodable_msgid():
+    # a lone surrogate would crash a strict .encode(); the shared helper must
+    # yield a stable id instead of aborting the rebuild
+    weird = "<a\udcff@x>"
+    assert len(threads.stable_id(weird, 12)) == 12
+    assert threads.stable_id(weird, 12) == threads.stable_id(weird, 12)
+
+
+def test_order_is_shared_between_renderer_and_thread_anchor():
+    assert generate._sortkey is threads.order
+
+
+def test_obfuscate_bounded_gunzip_contract():
+    import gzip as _gz
+
+    import obfuscate
+    blob = _gz.compress(b"y" * 5000)
+    assert obfuscate._bounded_gunzip(blob, 5000) == b"y" * 5000
+    assert obfuscate._bounded_gunzip(blob, 4999) is None     # over limit
+    assert obfuscate._bounded_gunzip(b"not gzip", 100) is None
+    assert obfuscate._bounded_gunzip(blob, -1) is None
+
+
 def test_webfetch_gunzip_bounded():
     import gzip as _gz
 

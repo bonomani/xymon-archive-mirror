@@ -66,12 +66,29 @@ def components(rows):
 # component keeps an id already assigned to any of its members; only a brand-new
 # thread gets a fresh id, derived from its anchor (earliest message's Msg-Id).
 
-def _order(r):
+def order(r):
+    """THE chronological sort key: shared by the renderer's display roots
+    (generate._sortkey) and the id-anchor choice below, so the message a
+    reader sees first and the message that mints the thread id can never
+    disagree."""
     return (r["date_iso"] is None, r["date_iso"] or "", r["id"])
 
 
+_order = order                  # historical internal alias
+
+
+def stable_id(msgid: str, n: int) -> str:
+    """First ``n`` hex chars of sha1(Message-Id) -- the permanent identity
+    behind thread/<tid> (n=12) and msg/<id> (n=16) permalinks. utf-8 with
+    "replace" so an exotic msgid yields a stable id instead of crashing the
+    rebuild (ids of encodable msgids -- i.e. all existing ones -- are
+    unchanged by the replace policy)."""
+    return hashlib.sha1(
+        (msgid or "").encode("utf-8", "replace")).hexdigest()[:n]
+
+
 def _tid(msgid: str) -> str:
-    return hashlib.sha1((msgid or "").encode()).hexdigest()[:_TID_LEN]
+    return stable_id(msgid, _TID_LEN)
 
 
 def thread_ids(rows, prior=None) -> dict:
