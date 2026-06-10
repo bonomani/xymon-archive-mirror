@@ -108,8 +108,13 @@ _UNSUB_LINE = re.compile(
     r"(?:[\s>]|&gt;|&nbsp;|<br\s*/?>)*"
     r"(?:<a\b[^>]*>[^<]*</a>|[^\s<]+@[^\s<]+)?",
     re.I)
+# NOTE: no "|\xa0" alternative -- \s already matches NBSP in unicode mode, and
+# the overlap made the star ambiguous (two parses per \xa0 -> exponential
+# backtracking; a 2019 Gmail reply with "\xa0<br>" runs hung the full render).
+# The remaining alternatives are disjoint at their first character, so the
+# star is deterministic.
 _EMPTY_WRAP = re.compile(
-    r"<(pre|blockquote|div|p)>(?:\s|&nbsp;|<br\s*/?>|\xa0)*</\1>", re.I)
+    r"<(pre|blockquote|div|p)>(?:\s|&nbsp;|<br\s*/?>)*</\1>", re.I)
 
 
 def strip_list_footers(s: str) -> str:
