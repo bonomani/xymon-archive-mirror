@@ -6,18 +6,17 @@
 // is NOT found earlier in the thread (upper bound on false positives -- includes
 // legit off-thread quotes), and visible text that IS duplicated from an earlier
 // message (missed-dup / false-negative signal). Prints samples for human review.
-const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { JSDOM, scriptSource, stripBoot, setGlobals, visText } =
+  require('./harness');
 
 const SITE = process.env.SITE || 'site';
 const SAMPLE = parseInt(process.env.SAMPLE || '400', 10);
 const DATA = JSON.parse(fs.readFileSync(path.join(SITE, 'search-index.json'), 'utf8'));
 const BODIES = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(SITE, 'body-index.json.gz'))));
-const scriptFile = fs.readdirSync(SITE).find(f => /^script\..+\.js$/.test(f)) || 'script.js';
-const SC = fs.readFileSync(path.join(SITE, scriptFile), 'utf8')
-  .replace(/document\.addEventListener\('DOMContentLoaded'[\s\S]*$/, '');
+const SC = stripBoot(scriptSource(SITE));
 
 const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean);
 const byTid = {};
@@ -28,17 +27,6 @@ function longestCoveredRun(words, prior, k) {
   for (let i = 0; i + k <= words.length; i++)
     if (prior.has(words.slice(i, i + k).join(' '))) for (let j = i; j < i + k; j++) cov[j] = true;
   let run = 0, mx = 0; for (const c of cov) { run = c ? run + 1 : 0; if (run > mx) mx = run; } return mx;
-}
-function visibleText(el) {
-  let v = ''; (function w(x) { [].forEach.call(x.childNodes, n => {
-    if (n.nodeType === 1 && n.classList && n.classList.contains('q')) return;
-    if (n.nodeType === 3) v += ' ' + n.textContent; else if (n.nodeType === 1) w(n);
-  }); })(el.querySelector('.md,.pt') || el); return v;
-}
-
-function setGlobals(dom) {
-  global.document = dom.window.document; global.window = dom.window;
-  global.NodeFilter = dom.window.NodeFilter; global.DOMParser = dom.window.DOMParser;
 }
 setGlobals(new JSDOM('<!doctype html><body>'));   // define client JS once
 eval(SC);
@@ -69,7 +57,7 @@ for (const tid of sample) {
           suspect++; if (suspects.length < 12) suspects.push(`[${DATA[i][2]}] ${fw.slice(0, 18).join(' ')}…`);
         }
       });
-      const vw = norm(visibleText(el));
+      const vw = norm(visText(el));
       if (vw.length >= 12 && longestCoveredRun(vw, prior, 6) >= 12) {
         missed++; if (misses.length < 12) misses.push(`[${DATA[i][2]}] tid=${tid} mid=${DATA[i][0]}`);
       }

@@ -11,12 +11,11 @@ import email
 import re
 import sqlite3
 import time
-import urllib.request
-import zlib
 from pathlib import Path
 from typing import Iterator
 
 import mailstore
+import webfetch
 
 BASE = "https://lists.xymon.com/"
 LIST = "xymon"
@@ -35,28 +34,14 @@ _FROM = re.compile(
 
 
 def fetch(url: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = resp.read(_MAX_FETCH + 1)
-    if len(data) > _MAX_FETCH:
-        raise ValueError(f"response exceeds {_MAX_FETCH} bytes: {url}")
+    """Capped GET via the shared hardened layer (webfetch)."""
+    data, _ = webfetch.get(url, max_bytes=_MAX_FETCH, timeout=60, ua=UA)
     return data
 
 
 def _gunzip_bounded(data: bytes, limit: int = _MAX_GUNZIP) -> bytes:
-    """Decompress a gzip stream, aborting once output would exceed `limit` -- a
-    crafted (or corrupted) .txt.gz can't expand to gigabytes and OOM the runner
-    before a size check fires (the SSRF/cap hardening parity for the crawler)."""
-    d = zlib.decompressobj(31)                 # 16 + MAX_WBITS -> gzip framing
-    out = bytearray(d.decompress(data, limit + 1))
-    while d.unconsumed_tail and len(out) <= limit:
-        out += d.decompress(d.unconsumed_tail, limit + 1 - len(out))
-    if len(out) > limit:
-        raise ValueError(f"gzip expands beyond {limit} bytes")
-    out += d.flush()
-    if len(out) > limit:
-        raise ValueError(f"gzip expands beyond {limit} bytes")
-    return bytes(out)
+    """Bounded gunzip (gzip-bomb guard) -- shared implementation."""
+    return webfetch.gunzip_bounded(data, limit)
 
 
 def list_months() -> list[str]:

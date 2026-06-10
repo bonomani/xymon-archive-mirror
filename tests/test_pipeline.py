@@ -636,6 +636,36 @@ def test_fetch_attachments_rejects_unsafe_urls():
         assert raised, bad
 
 
+# --- webfetch: the one shared hardened HTTP layer ------------------------------
+
+def test_webfetch_allowlist_rejects_unsafe_urls():
+    import webfetch
+    for bad in ("http://lists.xymon.com/x",            # not https
+                "https://evil.com/x",                  # wrong host
+                "https://lists.xymon.com.evil.com/x",  # suffix trick
+                "ftp://lists.xymon.com/x"):            # wrong scheme
+        raised = False
+        try:
+            webfetch.get(bad, max_bytes=1, allowed_hosts={"lists.xymon.com"})
+        except ValueError:
+            raised = True
+        assert raised, bad
+
+
+def test_webfetch_gunzip_bounded():
+    import gzip as _gz
+
+    import webfetch
+    blob = _gz.compress(b"x" * 10000)
+    assert webfetch.gunzip_bounded(blob, 10000) == b"x" * 10000
+    raised = False
+    try:
+        webfetch.gunzip_bounded(blob, 9999)    # bomb guard: limit enforced
+    except ValueError:
+        raised = True
+    assert raised
+
+
 # --- #5 cached scrubbed HTML is re-sanitized from raw_html --------------------
 
 def test_scrubbed_html_resanitizes_from_cache(tmp_path):

@@ -22,11 +22,10 @@ import argparse
 import re
 import sqlite3
 import time
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
 import mailstore
+import webfetch
 
 # Worth mirroring: source, patches, scripts, archives, configs, docs/data.
 # Deliberately excluded: html/htm (re-render of the body), images, vcf,
@@ -48,28 +47,15 @@ _ALLOWED_HOSTS = frozenset(("lists.xymon.com",))
 _MAX_BYTES = 25 * 1024 * 1024            # 25 MB ceiling per attachment
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *a, **k):  # noqa: ARG002
-        return None                       # refuse every redirect
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
-
-
 def httpget(url: str, timeout: int = 60):
     """GET ``url`` with our User-Agent. Returns ``(body_bytes, headers)``.
 
-    Hardened: HTTPS + allowlisted host only, redirects refused, body capped at
-    ``_MAX_BYTES`` (these URLs are attacker-influenced -- see module note)."""
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or (parts.hostname or "").lower() not in _ALLOWED_HOSTS:
-        raise ValueError(f"refusing non-allowlisted attachment URL: {url}")
-    resp = _OPENER.open(
-        urllib.request.Request(url, headers={"User-Agent": UA}), timeout=timeout)
-    data = resp.read(_MAX_BYTES + 1)
-    if len(data) > _MAX_BYTES:
-        raise ValueError(f"attachment exceeds {_MAX_BYTES} bytes: {url}")
-    return data, resp.headers
+    Hardened via the shared webfetch layer: HTTPS + allowlisted host only,
+    redirects refused, body capped at ``_MAX_BYTES`` (these URLs are
+    attacker-influenced -- see module note)."""
+    return webfetch.get(url, max_bytes=_MAX_BYTES,
+                        allowed_hosts=_ALLOWED_HOSTS,
+                        follow_redirects=False, timeout=timeout, ua=UA)
 
 
 def fix_url(u: str) -> str:

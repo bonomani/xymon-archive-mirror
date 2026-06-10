@@ -3,9 +3,10 @@
 // page's inline script) against the BUILT site/ with jsdom and assert the
 // behaviours we regressed on (folding, search, inline-expand). Exit non-zero on
 // failure so CI blocks the deploy.  Run: SITE=site [FULL=1] [SCAN=500] node tests/ui_test.js
-const { JSDOM } = require('jsdom');
 const fs = require('fs');
 const path = require('path');
+const { JSDOM, scriptSource, stripBoot, setGlobals, visText } =
+  require('./harness');
 
 const SITE = process.env.SITE || 'site';
 const SCAN = parseInt(process.env.SCAN || '500', 10);   // cap thread scan (memory)
@@ -15,14 +16,9 @@ const fail = m => { console.error('  FAIL ', m); fails++; };
 const skip = m => { console.log('  skip ', m); skips++; };
 const assert = (c, m) => c ? ok(m) : fail(m);
 
-const scriptFile = fs.readdirSync(SITE).find(f => /^script\..+\.js$/.test(f)) || 'script.js';
-const script = fs.readFileSync(path.join(SITE, scriptFile), 'utf8');
-const SC = script.replace(/document\.addEventListener\('DOMContentLoaded'[\s\S]*$/, '');
+const script = scriptSource(SITE);
+const SC = stripBoot(script);
 
-function setGlobals(dom) {
-  global.document = dom.window.document; global.window = dom.window;
-  global.NodeFilter = dom.window.NodeFilter; global.DOMParser = dom.window.DOMParser;
-}
 // define the client JS once (re-eval per doc would leak); folders read the
 // CURRENT global.document at call time, so we just swap globals per thread.
 setGlobals(new JSDOM('<!doctype html><body>', { url: 'https://x/' }));
@@ -34,14 +30,6 @@ function foldDoc(tid) {
   setGlobals(dom);
   foldQuotes(document);
   return dom;
-}
-function visText(m) {
-  let v = '';
-  (function w(el) { [].forEach.call(el.childNodes, n => {
-    if (n.nodeType === 1 && n.classList && n.classList.contains('q')) return;
-    if (n.nodeType === 3) v += n.textContent; else if (n.nodeType === 1) w(n);
-  }); })(m.querySelector('.md,.pt'));
-  return v.replace(/\s+/g, ' ').trim();
 }
 
 console.log('1) features present in script.js');
