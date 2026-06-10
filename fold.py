@@ -54,6 +54,13 @@ _MAX_SWEEP_TOTAL = 60     # hard cap including blanks (runaway guard)
 
 _WORD = re.compile(r"\S+")
 _NORM = re.compile(r"[^a-z0-9]+")
+# C0 control characters (minus \t \n \r): illegal in XML, so lxml refuses to
+# re-serialize text containing them -- a NUL pasted into a 2003 mail made the
+# whole message silently render unfolded. Replace each with a SPACE before
+# parsing: same string length (offsets unchanged) and words stay separated
+# (plain stripping glued "foo\x0cbar" into one token and broke the shingle
+# match against the clean copy in the parent message).
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 # Furniture between the author's text and the quoted copy: header fields
 # (From:/Von:/Gesendet:/Betreff: ...), attributions ("On ... wrote:"),
@@ -74,6 +81,10 @@ _FURNITURE = re.compile(
 
 _BLOCKS = frozenset(
     "p div li blockquote tr pre h1 h2 h3 h4 h5 h6 ul ol table details".split())
+
+# observable health: generate.py prints this after a render so a regression
+# (messages silently falling back to unfolded) shows up in the build log.
+STATS = {"errors": 0}
 
 
 def _norm_words(text):
@@ -340,7 +351,8 @@ def fold_thread(bodies, authors):
         folded = raw
         full = None
         try:
-            root = lhtml.fragment_fromstring(raw or "<div></div>",
+            cleaned = _CTRL.sub(" ", raw) if raw else raw
+            root = lhtml.fragment_fromstring(cleaned or "<div></div>",
                                              create_parent="x-fold")
             body = root[0] if (len(root) == 1
                                and not (root.text or "").strip()) else root
@@ -354,9 +366,13 @@ def fold_thread(bodies, authors):
                     if _fold_range(body, segs, cut, end, who):
                         ser = lhtml.tostring(root, encoding="unicode")
                         folded = re.sub(r"^<x-fold>|</x-fold>$", "", ser)
-        except Exception:
-            folded = raw                          # any surprise -> render as-is
-            full = None
+        except Exception as exc:                  # any surprise -> render as-is,
+            folded = raw                          # but never silently: an audit
+            full = None                           # found 11 messages lost here.
+            STATS["errors"] += 1
+            print(f"fold: message {mi} ({authors[mi] if mi < len(authors) else '?'}) "
+                  f"rendered unfolded: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
         out.append(folded)
         ws = _norm_words(full) if full is not None else _norm_words(
             re.sub(r"<[^>]+>", " ", raw or ""))

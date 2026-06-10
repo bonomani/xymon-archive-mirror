@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import threads
-from fold import fold_thread
+from fold import STATS as fold_stats, fold_thread
 from mailstore import MONTH_ORDER, month_key
 from names import clean as _clean_name
 
@@ -971,7 +971,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "15-bounded-fold"
+RENDER_VERSION = "16-ctrl-chars"
 
 
 _CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')
@@ -1506,6 +1506,9 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
         nth += 1
     print(f"{'incremental' if incremental else 'full'} render: "
           f"{nth}/{len(bythread)} thread pages")
+    if fold_stats["errors"]:
+        print(f"WARNING: {fold_stats['errors']} message(s) rendered unfolded "
+              f"after a fold error (see stderr)")
 
     # drop pages for threads that no longer exist, then persist the manifest.
     for gone in set(old_threads) - set(new_threads):

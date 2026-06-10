@@ -162,6 +162,27 @@ def test_deep_quoted_mailman3_footer_dropped():
         assert not _is_footer_line(line), line
 
 
+def test_control_chars_do_not_break_folding():
+    """A NUL (or other C0 control char) pasted into a mail must not abort the
+    fold: lxml refuses to serialize such text, which used to make the whole
+    message silently render unfolded (11 corpus messages). They are stripped
+    before parsing; the quote folds and the marker survives sans control char."""
+    import fold as fold_mod
+    parent = ("<div class=pt><pre>the quick brown fox jumps over the lazy dog "
+              "and keeps running far away into the night</pre></div>")
+    child = ("<div class=pt><pre>thanks a lot \x00for the hint everyone\n"
+             "On Mon someone wrote:\n"
+             "the quick brown fox jumps over the lazy dog "
+             "and keeps running far away into the night</pre></div>")
+    before = fold_mod.STATS["errors"]
+    out = fold_thread([parent, child], ["a", "b"])
+    assert fold_mod.STATS["errors"] == before      # no swallowed exception
+    assert "<details" in out[1]                    # the quote folded
+    vis = _visible(out[1])
+    assert "thanks a lot" in vis and "\x00" not in vis
+    assert "quick brown fox" not in vis
+
+
 def test_inline_reply_not_swallowed():
     """A reply interleaving NEW answers between quoted blocks fails tail
     validation -> no server fold (the conservative client path handles it)."""
