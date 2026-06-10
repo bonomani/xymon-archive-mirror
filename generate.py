@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import threads
+from fold import fold_thread
 from mailstore import MONTH_ORDER, month_key
 from names import clean as _clean_name
 
@@ -970,7 +971,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "13-cid-att"
+RENDER_VERSION = "14-server-fold"
 
 
 _CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')
@@ -1452,7 +1453,14 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             continue
         head = members[0]
         blocks = []
-        for r in members:
+        mbodies = [_resolve_cids(body_to_html(r["body"], r["body_html"]),
+                                 atts_by_msgid.get(r["msgid"], ()))
+                   for r in members]
+        # server-side quote folding (fold.py): each message's content-proven
+        # quoted tail collapses behind a toggle ON THE THREAD PAGE; the
+        # canonical msg/ pages keep the unfolded body (stable reference).
+        folded = fold_thread(mbodies, [whom(r) for r in members])
+        for r, mbody, fbody in zip(members, mbodies, folded):
             anchor = msg_name(r)
             src = r["source"] or "list"
             badge = f"<span class='badge {e(src)}'>{e(src)}</span>"
@@ -1460,8 +1468,6 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
                      if (r["from_email"] and "@" in r["from_email"]
                          and not r["from_email"].endswith("@xymon.invalid"))
                      else "")
-            mbody = _resolve_cids(body_to_html(r["body"], r["body_html"]),
-                                  atts_by_msgid.get(r["msgid"], ()))
             matts = _att_block(r)
             # thread block (foldable, threaded view). The copy marker's data-href
             # is the MESSAGE permalink -> its canonical msg/<id>.html page.
@@ -1471,7 +1477,7 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
                 f"<span class=meta>&middot; {e(r['date_raw'])} &middot; "
                 f"<button class=copy type=button data-href='msg/{anchor}.html'"
                 f" title='copy link to this message'>&#128279; link</button>"
-                f"</span></summary>{mbody}{matts}</details>")
+                f"</span></summary>{fbody}{matts}</details>")
             # canonical single-message page: full body, quotes NOT folded, no JS
             # (scripts=False) -> a stable, feature-free reference for permalinks.
             msg_html = (
