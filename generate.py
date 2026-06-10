@@ -22,15 +22,12 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import threads
+from mailstore import MONTH_ORDER, month_key
 from names import clean as _clean_name
 
 from render_body import (  # body -> HTML rendering subsystem
     body_to_html, strip_footer, strip_scrub_notes, _QUOTE_PREFIX)
-MONTH_ORDER = {
-    m: i for i, m in enumerate(
-        ["January", "February", "March", "April", "May", "June", "July",
-         "August", "September", "October", "November", "December"], 1)
-}
 
 CSS = """
 body{font:15px/1.5 system-ui,sans-serif;margin:0;color:#1a1a1a;background:#fafafa}
@@ -717,14 +714,6 @@ def e(s: str | None) -> str:
     return html.escape(s or "")
 
 
-def month_key(month: str) -> tuple[int, int]:
-    try:
-        year, name = month.split("-", 1)
-        return (int(year), MONTH_ORDER.get(name, 0))
-    except ValueError:
-        return (0, 0)
-
-
 def _sortkey(r):
     return (r["date_iso"] is None, r["date_iso"] or "", r["id"])
 
@@ -769,6 +758,23 @@ def _xp(r) -> str:
     """Make the whole subject link an expand-in-place MESSAGE toggle (arrow + name);
     the global handler injects msg/<id>.html inline. href is the no-JS fallback."""
     return f"class=xpand data-mid='{msg_name(r)}' href='msg/{msg_name(r)}.html'"
+
+
+def _msg_line(r, att_counts) -> str:
+    """One message list line (subject toggle + attachment clip + author/date)
+    -- the shared <li> opening for the month flat list and the thread tree."""
+    return (f"<li><a {_xp(r)}>"
+            f"{e(r['subject']) or '(no subject)'}</a>"
+            f"{_clip(att_counts.get(r['msgid'], 0))} "
+            f"<span class=meta>{e(whom(r))} &middot; {short_date(r)}</span>")
+
+
+def _bar_row(cls: str, label: str, count: int, peak: int) -> str:
+    """One horizontal stat bar (label + track + count): .bar / .ubar rows."""
+    return (f"<div class={cls}>{label}"
+            f"<span class=btrack><span class=bbar "
+            f"style='width:{round(100 * count / peak)}%'></span></span>"
+            f"<span class=bc>{count:,}</span></div>")
 
 
 def _human(n: int) -> str:
@@ -879,36 +885,9 @@ def render_threads(rows, att_counts=None) -> str:
 
     # Define threads by union-find over reply links AND a shared distinctive
     # subject (so a subject-changed reply and its scattered siblings end up in
-    # one tree -- not split). Same grouping as thread_nav, kept consistent.
-    uf = {r["id"]: r["id"] for r in rows}
-
-    def find(x):
-        while uf[x] != x:
-            uf[x] = uf[uf[x]]
-            x = uf[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            uf[ra] = rb
-
-    for r in rows:
-        p = r["in_reply_to"]
-        if p and p in by_msgid and p != r["msgid"]:
-            union(r["id"], by_msgid[p]["id"])
-    subj_first: dict[str, int] = {}
-    for r in rows:
-        s = (r["subject"] or "").strip().lower()
-        if len(s) > 8:
-            if s in subj_first:
-                union(r["id"], subj_first[s])
-            else:
-                subj_first[s] = r["id"]
-
-    comp: dict[int, list] = defaultdict(list)
-    for r in rows:
-        comp[find(r["id"])].append(r)
+    # one tree -- not split). threads.components() is the one shared grouping
+    # (also used by the search-index pass and the private thread_ids).
+    comp = threads.components(rows)
 
     # One display root per thread (earliest true root); attach the component's
     # other roots (missing/foreign parents) under it so the thread is one tree.
@@ -925,11 +904,7 @@ def render_threads(rows, att_counts=None) -> str:
                 children[primary["msgid"]].append(m)
 
     def node(r, seen: frozenset) -> str:
-        who = whom(r)
-        out = (f"<li><a {_xp(r)}>"
-               f"{e(r['subject']) or '(no subject)'}</a>"
-               f"{_clip(att_counts.get(r['msgid'], 0))} "
-               f"<span class=meta>{e(who)} &middot; {short_date(r)}</span>")
+        out = _msg_line(r, att_counts)
         kids = sorted(children.get(r["msgid"], ()), key=_sortkey)
         if kids and r["id"] not in seen:
             seen = seen | {r["id"]}
@@ -1111,12 +1086,10 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     maxy = max(yr_count.values()) if yr_count else 1
     bars = "<h2 class=stath>Messages per year</h2><div class=bars>"
     for y in sorted(years, reverse=True):
-        c = yr_count[y]
         # the id=y<year> anchors live on the Archive tab (index-year.html)
-        bars += (f"<div class=bar><a class=byr href='index-year.html#y{y}'>{e(y)}</a>"
-                 f"<span class=btrack><span class=bbar "
-                 f"style='width:{round(100*c/maxy)}%'></span></span>"
-                 f"<span class=bc>{c:,}</span></div>")
+        bars += _bar_row(
+            "bar", f"<a class=byr href='index-year.html#y{y}'>{e(y)}</a>",
+            yr_count[y], maxy)
     bars += "</div>"
 
     # --- most active participants (top 15 by displayed author name; multi-
@@ -1130,10 +1103,7 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
     maxu = top_u[0][1] if top_u else 1
     bars += "<h2 class=stath>Most active participants</h2><div class=bars>"
     for nm, c in top_u:
-        bars += (f"<div class=ubar><span class=un>{e(nm)}</span>"
-                 f"<span class=btrack><span class=bbar "
-                 f"style='width:{round(100*c/maxu)}%'></span></span>"
-                 f"<span class=bc>{c:,}</span></div>")
+        bars += _bar_row("ubar", f"<span class=un>{e(nm)}</span>", c, maxu)
     bars += "</div>"
 
     # Threads tab: a client-side browser over search-index.json (already loaded
@@ -1187,39 +1157,17 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
                  canon="" if href == "index.html" else href), "utf-8")
 
     # thread id per message (reply links + shared distinctive subject), so the
-    # client can group search hits under their thread.
+    # client can group search hits under their thread. Same grouping as the
+    # month tree: threads.components(). The [5] key only needs the partition,
+    # numbered in row order, so the output is stable across implementations.
     trows = conn.execute(
         "SELECT id, msgid, in_reply_to, subject FROM message").fetchall()
-    tby = {r["msgid"]: r["id"] for r in trows if r["msgid"]}
-    tpar = {r["id"]: r["id"] for r in trows}
-
-    def tfind(x):
-        while tpar[x] != x:
-            tpar[x] = tpar[tpar[x]]
-            x = tpar[x]
-        return x
-
-    def tunion(a, b):
-        ra, rb = tfind(a), tfind(b)
-        if ra != rb:
-            tpar[ra] = rb
-
-    for r in trows:
-        irt = r["in_reply_to"]
-        if irt and irt in tby:
-            tunion(r["id"], tby[irt])
-    tsubj = {}
-    for r in trows:
-        s = (r["subject"] or "").strip().lower()
-        if len(s) > 8:
-            if s in tsubj:
-                tunion(r["id"], tsubj[s])
-            else:
-                tsubj[s] = r["id"]
+    group_of = {r["id"]: root
+                for root, members in threads.components(trows).items()
+                for r in members}
     roots, tid_of = {}, {}
     for r in trows:
-        root = tfind(r["id"])
-        tid_of[r["id"]] = roots.setdefault(root, len(roots))
+        tid_of[r["id"]] = roots.setdefault(group_of[r["id"]], len(roots))
 
     # ---- search indexes (dependency-free client side):
     #   search-index.json    small: subject + author + date + att flag + thread
@@ -1306,15 +1254,7 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
                ORDER BY date_iso IS NULL, date_iso, id""", (m,)).fetchall()
 
         def flat_list(ordered) -> str:
-            out_ = ""
-            for r in ordered:
-                who = whom(r)
-                out_ += (
-                    f"<li><a {_xp(r)}>"
-                    f"{e(r['subject']) or '(no subject)'}</a>"
-                    f"{_clip(att_counts.get(r['msgid'], 0))} "
-                    f"<span class=meta>{e(who)} &middot; "
-                    f"{short_date(r)}</span></li>")
+            out_ = "".join(_msg_line(r, att_counts) + "</li>" for r in ordered)
             return f"<ul class=mlist>{out_}</ul>"
 
         # Single view: messages by date. The sort switcher (date / threaded /

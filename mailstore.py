@@ -478,6 +478,20 @@ _MONTH_NAMES = {
     "09": "September", "10": "October", "11": "November", "12": "December",
 }
 
+# This module owns the archive's "2024-January" month format, so the name
+# table and its sort key live here (the inverse map is derived, so the two
+# directions can never disagree). generate.py imports both.
+MONTH_ORDER = {name: int(num) for num, name in _MONTH_NAMES.items()}
+
+
+def month_key(month: str) -> tuple[int, int]:
+    """Sortable (year, month#) for a '2024-January' label; (0, 0) if malformed."""
+    try:
+        year, name = month.split("-", 1)
+        return (int(year), MONTH_ORDER.get(name, 0))
+    except ValueError:
+        return (0, 0)
+
 
 _INSERT = """INSERT OR IGNORE INTO message
     (month, msgid, in_reply_to, subject, from_name, from_email,

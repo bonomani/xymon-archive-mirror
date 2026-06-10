@@ -417,6 +417,22 @@ def test_clean_name_mixed_case_preserved():
     assert generate._clean_name("Scot McConnell") == "Scot McConnell"
 
 
+# --- mailstore: single month-name authority ------------------------------------
+
+def test_month_order_is_inverse_of_month_names():
+    # both directions derive from one table, so they can never disagree
+    assert mailstore.MONTH_ORDER == {
+        n: int(k) for k, n in mailstore._MONTH_NAMES.items()}
+    assert generate.MONTH_ORDER is mailstore.MONTH_ORDER
+
+
+def test_month_key_sorts_and_tolerates_garbage():
+    assert mailstore.month_key("2024-January") == (2024, 1)
+    assert mailstore.month_key("2005-December") == (2005, 12)
+    assert mailstore.month_key("nonsense") == (0, 0)
+    assert mailstore.month_key("2024-Smarch") == (2024, 0)
+
+
 # --- generate: page chrome, SEO scaffolding -----------------------------------
 
 def test_threads_page_no_literal_unicode_escape():
