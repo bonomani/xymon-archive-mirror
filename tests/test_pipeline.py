@@ -636,6 +636,106 @@ def test_fetch_attachments_rejects_unsafe_urls():
         assert raised, bad
 
 
+# --- image policy: metadata stripping + size cap + inline render ---------------
+
+def _png_chunk(typ: bytes, data: bytes) -> bytes:
+    import struct
+    import zlib as _z
+    return (struct.pack(">I", len(data)) + typ + data
+            + struct.pack(">I", _z.crc32(typ + data) & 0xffffffff))
+
+
+def _png_bytes(extra: bytes = b"") -> bytes:
+    import struct
+    import zlib as _z
+    return (b"\x89PNG\r\n\x1a\n"
+            + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+            + extra
+            + _png_chunk(b"IDAT", _z.compress(b"\x00\x00"))
+            + _png_chunk(b"IEND", b""))
+
+
+def _jpeg_bytes(meta: bytes = b"") -> bytes:
+    app0 = b"\xff\xe0" + (7).to_bytes(2, "big") + b"JFIF\x00"
+    return (b"\xff\xd8" + app0 + meta
+            + b"\xff\xda\x00\x02" + b"scan" + b"\xff\xd9")
+
+
+def test_strip_image_metadata_png_and_jpeg():
+    dirty_png = _png_bytes(_png_chunk(b"tEXt", b"Author\x00Jane Real"))
+    assert obfuscate.strip_image_metadata(
+        "image/png", "s.png", dirty_png) == _png_bytes()
+    exif = b"\xff\xe1" + (12).to_bytes(2, "big") + b"Exif\x00\x00GPS!"
+    com = b"\xff\xfe" + (9).to_bytes(2, "big") + b"comment"
+    out = obfuscate.strip_image_metadata(
+        "image/jpeg", "s.jpg", _jpeg_bytes(exif + com))
+    assert out == _jpeg_bytes()
+    assert b"GPS!" not in out and b"comment" not in out
+    # unparseable / unsupported formats -> None (caller withholds)
+    assert obfuscate.strip_image_metadata("image/png", "x.png", b"junk") is None
+    assert obfuscate.strip_image_metadata("image/gif", "x.gif", b"GIF89a") is None
+
+
+def test_obfuscate_strips_image_metadata_and_withholds_malformed(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    db = str(tmp_path / "a.db")
+    conn = mailstore.connect(db)
+    _att(conn, "shot.png",
+         _png_bytes(_png_chunk(b"tEXt", b"Author\x00Jane Real")), "image/png")
+    _att(conn, "broken.jpg", b"\xff\xd8junk-not-a-jpeg", "image/jpeg")
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    rows = {f: (c, ct) for f, c, ct in sqlite3.connect(db).execute(
+        "SELECT filename, content, content_type FROM attachment")}
+    c, _ct = rows["shot.png"]
+    assert b"Jane Real" not in c and bytes(c) == _png_bytes()
+    c2, ct2 = rows["broken.jpg"]
+    assert b"withheld" in c2 and ct2 == "text/plain"
+
+
+def test_import_inline_attachments_image_cap():
+    from email.message import EmailMessage
+
+    import import_mbox
+    m = EmailMessage()
+    m["Message-Id"] = "<i@x>"
+    m.set_content("hi")
+    m.add_attachment(b"x" * (import_mbox.IMG_MAX + 1),
+                     maintype="image", subtype="png", filename="big.png")
+    m.add_attachment(_png_bytes(),
+                     maintype="image", subtype="png", filename="small.png")
+    out = import_mbox.inline_attachments(m, "<i@x>", "2026-June")
+    names = [a["filename"] for a in out]
+    assert "small.png" in names
+    assert "big.png" not in names                 # over the per-image cap
+
+
+def test_build_renders_image_attachment_inline(tmp_path):
+    db, out = tmp_path / "a.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [dict(
+        month="2026-June", msgid="<s@x>", in_reply_to=None, subject="Shots",
+        from_name="Ann", from_email="user-x@xymon.invalid",
+        date_iso="2026-06-01T10:00:00+00:00",
+        date_raw="Tue, 1 Jun 2026 10:00:00 -0000",
+        body="Here are some screenshots:", source="list",
+        body_html=None, raw=None)])
+    png = _png_bytes()
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES ('<s@x>','2026-June','inline:<s@x>#1',"
+        "'shot.png','image/png',?,?)", (len(png), png))
+    conn.commit()
+    conn.close()
+    generate.build(db, out)
+    (page_path,) = list((out / "thread").glob("*.html"))
+    html_ = page_path.read_text("utf-8")
+    assert "<img src='../att/" in html_ and "shot.png" in html_
+    assert (out / "att").rglob("shot.png")        # file materialized
+
+
 # --- mailstore.iter_mbox: the one mbox splitter --------------------------------
 
 def test_iter_mbox_unescapes_mboxrd_but_keeps_chunk_verbatim():

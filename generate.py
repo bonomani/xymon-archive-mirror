@@ -85,6 +85,8 @@ ul.thread li{margin:4px 0}
 .att{margin:14px 0;padding:10px 14px;background:#fff7e6;
     border:1px solid #f0d9a8;border-radius:6px}
 .att ul{margin:6px 0 0} .att li{margin:3px 0}
+.att img{display:block;max-width:100%;max-height:260px;background:#fff;
+    border:1px solid #e3e3e3;border-radius:4px;margin:2px 0 1px}
 .hsearch{float:right;font-size:13px;opacity:.85}
 .clip{font-size:12px;opacity:.75;cursor:default}
 pre a{color:#338a3a}
@@ -967,7 +969,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "10-seo-meta"
+RENDER_VERSION = "11-image-att"
 
 # The four index tabs (label, href) in display order; the Search tab is the
 # site root. One list feeds the tab bar, the page writer AND the sitemap, so
@@ -1347,7 +1349,14 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             adir = out / "att" / str(a["id"])
             adir.mkdir(parents=True, exist_ok=True)
             (adir / fname).write_bytes(a["content"])
-            links += (f"<li><a href='../att/{a['id']}/{e(fname)}'>{e(fname)}</a> "
+            href = f"../att/{a['id']}/{e(fname)}"
+            is_img = ((a["content_type"] or "").lower().startswith("image/")
+                      or fname.lower().endswith((".png", ".jpg", ".jpeg")))
+            # screenshots render inline (metadata already stripped by
+            # obfuscate.py); everything else stays a download link.
+            label = (f"<img src='{href}' alt='{e(fname)}' loading=lazy>"
+                     f"{e(fname)}" if is_img else e(fname))
+            links += (f"<li><a href='{href}'>{label}</a> "
                       f"<span class=meta>{e(a['content_type'] or '')} &middot; "
                       f"{_human(a['size'])}</span></li>")
         return (f"<div class=att><b>Attachments ({len(atts)})</b>"

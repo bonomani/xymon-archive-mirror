@@ -384,6 +384,78 @@ def _bounded_gunzip(data: bytes, limit: int):
         return None
 
 
+# --- image metadata stripping --------------------------------------------------
+# Images bypass the text scrubbers entirely, but their metadata containers
+# (EXIF, XMP, comments, textual chunks) can carry author names, GPS positions
+# and software fingerprints. Publish pixels only: stdlib walkers rebuild the
+# file without metadata segments. Anything we cannot parse -- or any image
+# format we have no walker for -- is withheld, same stance as archives that
+# cannot be fully inspected (the original stays in the private vault).
+
+_IMG_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def _is_image(ct: str, name: str) -> bool:
+    return ((ct or "").lower().startswith("image/")
+            or (name or "").lower().endswith(_IMG_EXTS))
+
+
+def _strip_png_meta(data: bytes):
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return None
+    drop = {b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"}
+    out, i = bytearray(data[:8]), 8
+    while i + 8 <= len(data):
+        ln = int.from_bytes(data[i:i + 4], "big")
+        typ = data[i + 4:i + 8]
+        end = i + 12 + ln                       # len + type + data + crc
+        if end > len(data):
+            return None                         # truncated/malformed
+        if typ not in drop:                     # untouched chunks keep their CRC
+            out += data[i:end]
+        i = end
+        if typ == b"IEND":
+            return bytes(out)
+    return None
+
+
+def _strip_jpeg_meta(data: bytes):
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    out, i = bytearray(b"\xff\xd8"), 2
+    while i + 4 <= len(data):
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:                      # fill byte
+            i += 1
+            continue
+        if marker in (0xD9, 0xDA):              # EOI / SOS: copy scan to end
+            out += data[i:]
+            return bytes(out)
+        ln = int.from_bytes(data[i + 2:i + 4], "big")
+        if ln < 2 or i + 2 + ln > len(data):
+            return None
+        # APP1..APP15 (EXIF/XMP/ICC-adjacent metadata) and COM comments are
+        # dropped; APP0 (JFIF) and the structural segments stay.
+        if not (0xE1 <= marker <= 0xEF or marker == 0xFE):
+            out += data[i:i + 2 + ln]
+        i += 2 + ln
+    return None
+
+
+def strip_image_metadata(ct: str, name: str, data: bytes):
+    """Cleaned bytes for png/jpeg, or None (unparseable / unsupported image
+    format) -- the caller withholds on None."""
+    low = (name or "").lower()
+    c = (ct or "").lower()
+    if c == "image/png" or low.endswith(".png"):
+        return _strip_png_meta(data)
+    if c == "image/jpeg" or low.endswith((".jpg", ".jpeg")):
+        return _strip_jpeg_meta(data)
+    return None
+
+
 def _is_container(content: bytes) -> bool:
     if content[:2] == b"\x1f\x8b" or content[:4] == b"PK\x03\x04":
         return True
@@ -818,7 +890,22 @@ def obfuscate(db: str) -> None:
         if nfn != fname or nurl != url:
             conn.execute("UPDATE attachment SET filename=?, url=? WHERE id=?",
                          (nfn, nurl, aid))
-        if content and _is_container(content):
+        if content and _is_image(ct, fname):
+            # pixels only: strip metadata containers; unparseable -> withhold
+            # (note: content is used as-is -- the byte-level address scrubber
+            # must never touch a binary image body).
+            cleaned = strip_image_metadata(ct, fname, bytes(content))
+            if cleaned is None:
+                conn.execute(
+                    "UPDATE attachment SET content=?, size=?, "
+                    "content_type='text/plain' WHERE id=?",
+                    (_WITHHELD, len(_WITHHELD), aid))
+            elif cleaned != content:
+                conn.execute(
+                    "UPDATE attachment SET content=?, size=? WHERE id=?",
+                    (cleaned, len(cleaned), aid))
+            att_changed += 1
+        elif content and _is_container(content):
             # compressed: byte-scanners can't see inside. Fully walk it first.
             # members is None => can't fully + safely inspect (encrypted, read
             # error, malformed, too deep, resource limit) -> WITHHOLD. If a member

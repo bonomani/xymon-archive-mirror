@@ -17,11 +17,12 @@ import re
 from pathlib import Path
 
 import mailstore
-from fetch_attachments import KEEP
+from fetch_attachments import IMG_EXTS, IMG_MAX, KEEP
 
 _VIA = re.compile(r"\s+via\s+Xymon\s*$", re.I)
 _KEEP_CT = {"text/x-patch", "text/x-diff", "application/zip",
-            "application/gzip", "application/x-tar", "application/x-gtar"}
+            "application/gzip", "application/x-tar", "application/x-gtar",
+            "image/png", "image/jpeg"}
 
 
 def inline_attachments(msg, msgid, month) -> list[dict]:
@@ -41,6 +42,9 @@ def inline_attachments(msg, msgid, month) -> list[dict]:
         data = part.get_payload(decode=True) or b""
         if not data:
             continue
+        if ((ct.startswith("image/") or ext in IMG_EXTS)
+                and len(data) > IMG_MAX):
+            continue              # screenshots only, not photo dumps
         idx += 1
         out.append({
             "msgid": msgid, "month": month,

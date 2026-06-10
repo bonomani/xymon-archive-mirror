@@ -27,15 +27,20 @@ from pathlib import Path
 import mailstore
 import webfetch
 
-# Worth mirroring: source, patches, scripts, archives, configs, docs/data.
-# Deliberately excluded: html/htm (re-render of the body), images, vcf,
-# and bin/sig (S/MIME + PGP signatures -- noise without the signed payload).
+# Worth mirroring: source, patches, scripts, archives, configs, docs/data,
+# and screenshots (png/jpeg <= IMG_MAX; obfuscate.py strips their metadata
+# before publish). Deliberately excluded: html/htm (re-render of the body),
+# other image formats (no metadata stripper -> obfuscate would withhold),
+# vcf, and bin/sig (S/MIME + PGP signatures -- noise without the payload).
 KEEP = {
     "zip", "tar", "gtar", "gz", "tgz", "bz2", "patch", "diff", "obj",
     "c", "cpp", "h", "hpp", "sh", "ksh", "bash", "pl", "pm", "py", "rb",
     "ps1", "php", "sql", "txt", "cfg", "conf", "ini", "xml", "css", "json",
     "yaml", "yml", "key", "pdf", "docx", "xls", "xlsx", "csv",
+    "png", "jpg", "jpeg",
 }
+IMG_EXTS = {"png", "jpg", "jpeg"}
+IMG_MAX = 300 * 1024          # per-image ceiling: screenshots, not photo dumps
 URL_RE = re.compile(r"URL:\s*<([^>]+)>", re.S)
 UA = "xymon-discussion-public/1.0 (+attachments)"
 
@@ -102,6 +107,9 @@ def main(argv=None) -> None:
         try:
             data, hdr = httpget(url)
             ctype = hdr.get("Content-Type", "").split(";")[0].strip()
+            if ext_of(url) in IMG_EXTS and len(data) > IMG_MAX:
+                print(f"  - image over {IMG_MAX // 1024} KB cap, skipped: {url}")
+                continue
             conn.execute(
                 "INSERT OR IGNORE INTO attachment "
                 "(msgid, month, url, filename, content_type, size, content) "
