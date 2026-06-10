@@ -161,8 +161,17 @@ function foldQuotes(root){
   function qsum(){ var s=document.createElement('summary');
     var a=document.createElement('span'); a.className='ar';
     a.textContent=String.fromCharCode(0x25B8); s.appendChild(a); return s; }
+  // visible words of an element, ignoring already-folded details.q content --
+  // the never-hollow guard for the blockquote path below (foldRange has its
+  // own; without one here a pure-quote message folded down to NOTHING).
+  function visWords(el){ var t=0; (function w(x){ [].forEach.call(x.childNodes,function(n){
+    if(n.nodeType===1){ if(n.classList&&n.classList.contains('q')) return; w(n); }
+    else if(n.nodeType===3) t+=(n.textContent.match(/\\S+/g)||[]).length; }); })(el);
+    return t; }
   root.querySelectorAll('blockquote').forEach(function(bq){
     if(bq.closest('details.q')) return;           // outermost quote only
+    var host=bq.closest('.pt,.md');               // never hollow the message:
+    if(host && visWords(host)-visWords(bq)<3) return;  // keep the quote visible
     // merge consecutive quotes: if only whitespace/<br> sits before this one and
     // the node before that is an already-folded quote, append into it (one fold).
     var prev=bq.previousSibling;
@@ -971,7 +980,7 @@ fetch('search-index.json').then(function(r){return r.json();}).then(function(D){
 
 # Folded into every message-page signature: bump when the RENDERING changes
 # (not the data), so the incremental manifest re-renders all pages once.
-RENDER_VERSION = "16-ctrl-chars"
+RENDER_VERSION = "18-att-dedup"
 
 
 _CID_IMG = re.compile(r'<img src="cid:([^"]+)"[^>]*>')
@@ -1408,18 +1417,30 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
         key = (r["thread_id"] if has_tid and r["thread_id"] else msg_name(r))
         bythread[key].append(r)
 
-    def _att_block(r):
-        """Write this message's attachment files and return the HTML box."""
+    def _att_block(r, seen=None):
+        """Write this message's attachment files and return the HTML box.
+        With ``seen`` (a thread-scoped set of content digests), an attachment
+        whose CONTENT already appeared on an earlier message is omitted from
+        the box: mail clients re-attach the quoted message's inline images
+        under generic names (image001.png ...), so the same screenshot showed
+        up once per reply -- duplicated content folds away on the thread page
+        exactly like quoted text. The files themselves are still written (the
+        canonical msg/ pages keep every message's faithful full list)."""
         atts = atts_by_msgid.get(r["msgid"], ())
         if not atts:
             return ""
-        links = ""
+        links, listed = "", 0
         for a in atts:
             fname = _safe(a["filename"])
             digest = _att_dir(a)
             adir = out / "att" / digest
             adir.mkdir(parents=True, exist_ok=True)
             (adir / fname).write_bytes(a["content"])
+            if seen is not None:
+                if digest in seen:
+                    continue                    # a re-attachment of earlier content
+                seen.add(digest)
+            listed += 1
             href = f"../att/{digest}/{e(fname)}"
             is_img = ((a["content_type"] or "").lower().startswith("image/")
                       or fname.lower().endswith((".png", ".jpg", ".jpeg")))
@@ -1432,7 +1453,9 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             links += (f"<li><a href='{href}'>{label}</a> "
                       f"<span class=meta>{e(a['content_type'] or '')} &middot; "
                       f"{_human(a['size'])}</span></li>")
-        return (f"<div class=att><b>Attachments ({len(atts)})</b>"
+        if not listed:
+            return ""
+        return (f"<div class=att><b>Attachments ({listed})</b>"
                 f"<ul>{links}</ul></div>")
 
     new_threads, nth = {}, 0
@@ -1460,6 +1483,7 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
         # quoted tail collapses behind a toggle ON THE THREAD PAGE; the
         # canonical msg/ pages keep the unfolded body (stable reference).
         folded = fold_thread(mbodies, [whom(r) for r in members])
+        seen_att: set = set()      # content digests already shown in this thread
         for r, mbody, fbody in zip(members, mbodies, folded):
             anchor = msg_name(r)
             src = r["source"] or "list"
@@ -1468,7 +1492,8 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
                      if (r["from_email"] and "@" in r["from_email"]
                          and not r["from_email"].endswith("@xymon.invalid"))
                      else "")
-            matts = _att_block(r)
+            tatts = _att_block(r, seen_att)    # thread box: content-deduped
+            matts = _att_block(r)              # msg page: faithful full list
             # thread block (foldable, threaded view). The copy marker's data-href
             # is the MESSAGE permalink -> its canonical msg/<id>.html page.
             blocks.append(
@@ -1477,7 +1502,7 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
                 f"<span class=meta>&middot; {e(r['date_raw'])} &middot; "
                 f"<button class=copy type=button data-href='msg/{anchor}.html'"
                 f" title='copy link to this message'>&#128279; link</button>"
-                f"</span></summary>{fbody}{matts}</details>")
+                f"</span></summary>{fbody}{tatts}</details>")
             # canonical single-message page: full body, quotes NOT folded, no JS
             # (scripts=False) -> a stable, feature-free reference for permalinks.
             msg_html = (

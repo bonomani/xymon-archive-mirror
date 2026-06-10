@@ -162,6 +162,37 @@ def test_deep_quoted_mailman3_footer_dropped():
         assert not _is_footer_line(line), line
 
 
+def test_inline_answers_inside_long_quote_stay_visible():
+    """THE swallow bug: short inline answers inside a long quote pass the 85%
+    tail-coverage ratio (they are under the 15% noise allowance), so the fold
+    ate them. An uncovered non-furniture line of >=4 words is FOREIGN prose
+    now -- the fold must end before it. Real case: Gary Baluha replying
+    point-by-point inside Ralph Mitchell's quoted list (thread 298c6f0e0954);
+    his answers were folded to a hollow message."""
+    vis, ftxt = _last_msg_views("fold_inline_reply_thread.json")
+    assert "I think my new method would handle that" in vis   # inline answer 1
+    assert "2-5: Wow..." in vis                                # inline answer 2
+    assert "really weird websites out there" in vis            # closing remark
+    assert len(vis.split()) >= 30
+
+
+def test_foreign_prose_is_per_line_not_ratio():
+    """A 7-word reply wedged between two covered blocks must block the fold
+    over it even though it is far below 15% of the tail."""
+    parent = ("<div class=pt><pre>alpha beta gamma delta epsilon zeta eta theta "
+              "iota kappa\nlambda mu nu xi omicron pi rho sigma tau upsilon\n"
+              "phi chi psi omega one two three four five six</pre></div>")
+    child = ("<div class=pt><pre>my own intro line says hello here\n"
+             "alpha beta gamma delta epsilon zeta eta theta iota kappa\n"
+             "lambda mu nu xi omicron pi rho sigma tau upsilon\n"
+             "this short answer is entirely mine here\n"
+             "phi chi psi omega one two three four five six</pre></div>")
+    out = fold_thread([parent, child], ["p", "c"])
+    vis = _visible(out[1])
+    assert "this short answer is entirely mine" in vis
+    assert "my own intro line" in vis
+
+
 def test_control_chars_do_not_break_folding():
     """A NUL (or other C0 control char) pasted into a mail must not abort the
     fold: lxml refuses to serialize such text, which used to make the whole

@@ -75,6 +75,49 @@ console.log('1b) attribution colon is not split into the quote fold (NBSP glue)'
   assert(det && foldTxt.indexOf('Just') === 0, 'fold body starts at the quoted word, not the colon');
 }
 
+console.log('1b2) blockquote fold never hollows a pure-quote message');
+{
+  // a message that is NOTHING but a quote (a pure forward, or every line
+  // '>'-prefixed) used to fold down to an empty body -- the blockquote path
+  // had no never-hollow guard (foldRange has one). The quote must stay
+  // visible when folding it would leave fewer than 3 visible words; a
+  // message with its own text keeps folding its quote as before.
+  const q = '<blockquote><pre>quoted words one two three four five six seven' +
+    '</pre></blockquote>';
+  const d = new JSDOM('<!doctype html><body data-root="./">' +
+    '<div class="tmsg"><div class="pt">' + q + '</div></div>' +
+    '<div class="tmsg"><div class="pt"><pre>my own reply text here.</pre>' + q +
+    '</div></div></body>', { url: 'https://x/' });
+  setGlobals(d);
+  foldQuotes(document);
+  const pure = document.querySelectorAll('.tmsg .pt')[0];
+  assert(!pure.querySelector('details.q') && visText(pure).includes('quoted words'),
+    'pure-quote message stays visible (not hollowed)');
+  const mixed = document.querySelectorAll('.tmsg .pt')[1];
+  assert(mixed.querySelector('details.q') && visText(mixed).includes('my own reply'),
+    'message with own text still folds its quote');
+}
+
+console.log('1d) thread page dedupes re-attached identical content');
+{
+  // Outlook re-attaches the quoted message's inline images under generic
+  // names (image001.png ...): the same screenshot used to be listed once per
+  // reply. The thread box must list content only on its FIRST appearance;
+  // the canonical msg/ pages keep each message's faithful full list.
+  const tp = path.join(SITE, 'thread', 'd97f38386169.html');
+  if (fs.existsSync(tp)) {
+    const t = fs.readFileSync(tp, 'utf8');
+    assert(!/image00\d\.(png|jpg)/.test(t),
+      'thread page lists no re-attachment copies');
+    assert(t.includes('xymon-5-home.png'),
+      'thread page lists the original attachment');
+    const mp = fs.readdirSync(path.join(SITE, 'msg'))
+      .map(f => path.join(SITE, 'msg', f))
+      .find(f => fs.readFileSync(f, 'utf8').includes('image001.png'));
+    assert(mp, 'msg/ pages keep the faithful per-message attachment list');
+  } else skip('html5-fork thread not in this corpus');
+}
+
 console.log('1c) contentDedup keeps an isolated inline re-quote visible (not folded)');
 {
   // contentDedup is line-granular: a single duplicated line wedged between the

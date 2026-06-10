@@ -48,6 +48,12 @@ _LINE_COVER = 0.8         # fraction of a line's words covered -> quote candidat
 _TAIL_COVER = 0.85        # fraction of cut..end words covered -> fold validated
 _MIN_TAIL_COVERED = 12    # too little duplicated text is not worth a fold
 _MIN_VISIBLE_WORDS = 3    # never fold a message down to less than this
+_MAX_UNCOVERED_RUN = 12   # consecutive uncovered prose words allowed in a fold:
+                          # the tail-coverage RATIO tolerates 15% noise, which is
+                          # exactly the size of a short inline answer inside a
+                          # long quote -- an absolute run cap catches what the
+                          # ratio forgives (furniture lines stay exempt: banners,
+                          # header fields and attributions are uncovered too)
 _MAX_CANDIDATES = 20      # cut candidates tried before giving up
 _MAX_SWEEP = 12           # non-blank furniture lines the cut may climb over
 _MAX_SWEEP_TOTAL = 60     # hard cap including blanks (runaway guard)
@@ -71,7 +77,9 @@ _CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _FURNITURE = re.compile(
     r"^\s*$"
     r"|^\s*>"
-    r"|^\s*[\wÀ-ÿ-]{1,15}\s*:\s"                      # Field: value
+    # Field: value -- the key needs at least one LETTER: an inline reply like
+    # "1: I think that would work" is prose, not a header field.
+    r"|^\s*(?=[\w-]*[^\W\d_])[\wÀ-ÿ-]{1,15}\s*:\s"
     r"|^\s*(On|Le|El|Am|Op|Den|P[aå]|Il giorno)\b"    # attribution opener
     r"|(wrote|schrieb|escribi[oó]|escreveu|skrev|ha scritto|a [eé]crit)\s*:?\s*$"
     r"|^\s*[-_*=]{2,}\s*(\S.*)?$"                     # separator / Original Message
@@ -202,21 +210,51 @@ def _plan(full, prior):
             nc[l] += 1
 
     last_cov = max((i for i in range(len(lines)) if nc[i]), default=-1)
+    furn = [bool(_FURNITURE.search(t)) for _, _, t in lines]
+    # FOREIGN prose: an (almost) uncovered non-furniture line with enough
+    # words to be a sentence -- an inline answer, a bottom-posted reply. It
+    # must NEVER end up inside a fold (the tail-coverage RATIO would tolerate
+    # it: a short answer inside a long quote is well under the 15% noise
+    # allowance). The bar is <25%: every observed real answer scored 0%,
+    # while quote lines mangled by rewrapping keep partial coverage -- at
+    # <50% the rule blocked legitimate folds over re-wrapped quotes.
+    foreign = [nw[i] >= _MIN_LINE_WORDS and not furn[i]
+               and nc[i] / nw[i] < 0.25 for i in range(len(lines))]
     candidates = [i for i in range(len(lines))
                   if nw[i] >= _MIN_LINE_WORDS and nc[i] / nw[i] >= _LINE_COVER]
     for ci in candidates[:_MAX_CANDIDATES]:
-        # try the full tail first; when an UNCOVERED suffix (disclaimer,
-        # bottom-posted text) ruins its coverage, retry bounded at the last
-        # quoted line -- the suffix then simply stays visible.
-        for end_line in (len(lines) - 1, last_cov):
+        # ends to try, in order: the full tail; the last quoted line (an
+        # uncovered SUFFIX -- disclaimer or bottom-posted text -- then stays
+        # visible); just before the first foreign line (an inline answer
+        # splits the quote -- fold only the chunk above it).
+        first_foreign = next((i for i in range(ci, len(lines)) if foreign[i]),
+                             None)
+        ends = [len(lines) - 1, last_cov]
+        if first_foreign is not None:
+            ends.append(first_foreign - 1)
+        for end_line in ends:
             if end_line < ci:
                 continue
+            if any(foreign[i] for i in range(ci, end_line + 1)):
+                continue                         # a reply inside -> never fold
             region = [i for i, t in enumerate(toks) if ci <= t[1] <= end_line]
             if not region:
                 continue
             covered = sum(1 for i in region if cov[i] is not None)
             if (covered < _MIN_TAIL_COVERED
                     or covered / len(region) < _TAIL_COVER):
+                continue
+            # belt-and-braces: also cap CONSECUTIVE uncovered prose words, so
+            # several short uncovered lines (each under the foreign-line bar)
+            # cannot add up to a hidden reply.
+            run = worst = 0
+            for i in region:
+                if cov[i] is None and not furn[toks[i][1]]:
+                    run += 1
+                    worst = max(worst, run)
+                else:
+                    run = 0
+            if worst > _MAX_UNCOVERED_RUN:
                 continue
             cut_line = ci                       # climb over quote furniture
             swept = 0                           # blanks free; real lines capped
