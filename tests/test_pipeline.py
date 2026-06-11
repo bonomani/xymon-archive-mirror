@@ -13,6 +13,7 @@ import sqlite3
 import mailstore
 import obfuscate
 import generate
+import pagelib
 import render_body
 import vaultcache
 import threads
@@ -204,7 +205,8 @@ def test_fetch_scrubbed_html_stores_raw_bytes(tmp_path, monkeypatch):
         "INSERT INTO message (month, msgid, body) VALUES (?,?,?)",
         ("2024-01", "<1@h>",
          "URL: <https://x/y/attachment.html>\n----- next part -----\n"))
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     cache = str(tmp_path / "cache.db")
     fsh.main(["--db", db, "--cache", cache, "--delay", "0"])
     rb = sqlite3.connect(cache).execute("SELECT raw_bytes FROM html").fetchone()
@@ -222,7 +224,8 @@ def test_fetch_scrubbed_html_backfills_raw_bytes(tmp_path, monkeypatch):
     cc.execute("CREATE TABLE html (url TEXT PRIMARY KEY, body_html TEXT, "
                "raw_html TEXT, raw_bytes BLOB)")
     cc.execute("INSERT INTO html (url, body_html) VALUES ('https://x/a.html','<p>x</p>')")
-    cc.commit(); cc.close()
+    cc.commit()
+    cc.close()
     db = str(tmp_path / "a.db")
     mailstore.connect(db).close()
     fsh.main(["--db", db, "--cache", cache, "--backfill-raw", "--delay", "0"])
@@ -243,7 +246,8 @@ def test_obfuscate_redacts_phone_in_text_attachment(tmp_path, monkeypatch):
     db = str(tmp_path / "p.db")
     conn = mailstore.connect(db)
     _att(conn, "contact.txt", b"call 801-446-5645 or mail joe@acme.com\n", "text/plain")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     obfuscate.obfuscate(db)
     (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
     assert b"801-446-5645" not in c and b"XXX-XXX-XXXX" in c
@@ -253,7 +257,8 @@ def test_obfuscate_redacts_phone_in_text_attachment(tmp_path, monkeypatch):
 def test_obfuscate_sanitizes_dupname_zip(tmp_path, monkeypatch):
     # duplicate ZIP names must not hide the earlier (leaky) entry (#3): read by
     # ZipInfo. Both entries get cleaned -> no address survives.
-    import io as _io, zipfile as _zip
+    import io as _io
+    import zipfile as _zip
     monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
     buf = _io.BytesIO()
     z = _zip.ZipFile(buf, "w")
@@ -263,7 +268,8 @@ def test_obfuscate_sanitizes_dupname_zip(tmp_path, monkeypatch):
     db = str(tmp_path / "z.db")
     conn = mailstore.connect(db)
     _att(conn, "d.zip", buf.getvalue(), "application/zip")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     obfuscate.obfuscate(db)
     (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
     members = obfuscate._inspect(c)
@@ -282,7 +288,8 @@ def test_obfuscate_withholds_overdepth_archive(tmp_path, monkeypatch):
     db = str(tmp_path / "deep.db")
     conn = mailstore.connect(db)
     _att(conn, "deep.gz", data)
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     obfuscate.obfuscate(db)
     (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
     assert c == obfuscate._WITHHELD
@@ -299,7 +306,8 @@ def test_obfuscate_withholds_archive_bomb_without_oom(tmp_path, monkeypatch):
     db = str(tmp_path / "bomb.db")
     conn = mailstore.connect(db)
     _att(conn, "bomb.gz", bomb)
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     obfuscate.obfuscate(db)
     (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
     assert c == obfuscate._WITHHELD
@@ -309,7 +317,8 @@ def test_obfuscate_withholds_archive_bomb_without_oom(tmp_path, monkeypatch):
 
 def test_obfuscate_withholds_over_member_limit(tmp_path, monkeypatch):
     # too many members (archive-bomb guard) -> withhold (#6).
-    import io as _io, zipfile as _zip
+    import io as _io
+    import zipfile as _zip
     monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
     monkeypatch.setattr(obfuscate, "_ARCH_MAX_MEMBERS", 3)
     buf = _io.BytesIO()
@@ -320,7 +329,8 @@ def test_obfuscate_withholds_over_member_limit(tmp_path, monkeypatch):
     db = str(tmp_path / "many.db")
     conn = mailstore.connect(db)
     _att(conn, "many.zip", buf.getvalue(), "application/zip")
-    conn.commit(); conn.close()
+    conn.commit()
+    conn.close()
     obfuscate.obfuscate(db)
     (c,) = sqlite3.connect(db).execute("SELECT content FROM attachment").fetchone()
     assert c == obfuscate._WITHHELD
@@ -409,30 +419,30 @@ def test_redaction_empty():
     assert not obfuscate._needs_attachment_redaction("text/plain", b"")
 
 
-# --- generate._clean_name -----------------------------------------------------
+# --- pagelib._clean_name -----------------------------------------------------
 
 def test_clean_name_comma_swap():
-    assert generate._clean_name("Root, Paul T") == "Paul T Root"
+    assert pagelib._clean_name("Root, Paul T") == "Paul T Root"
 
 
 def test_clean_name_allcaps_surname():
-    assert generate._clean_name("Cédric BRINER") == "Cédric Briner"
+    assert pagelib._clean_name("Cédric BRINER") == "Cédric Briner"
 
 
 def test_clean_name_lowercase():
-    assert generate._clean_name("deepak deore") == "Deepak Deore"
+    assert pagelib._clean_name("deepak deore") == "Deepak Deore"
 
 
 def test_clean_name_initials():
-    assert generate._clean_name("J.c. Cleaver") == "J.C. Cleaver"
+    assert pagelib._clean_name("J.c. Cleaver") == "J.C. Cleaver"
 
 
 def test_clean_name_particles_kept_lower():
-    assert generate._clean_name("Stefan van der Walt") == "Stefan van der Walt"
+    assert pagelib._clean_name("Stefan van der Walt") == "Stefan van der Walt"
 
 
 def test_clean_name_mixed_case_preserved():
-    assert generate._clean_name("Scot McConnell") == "Scot McConnell"
+    assert pagelib._clean_name("Scot McConnell") == "Scot McConnell"
 
 
 # --- mailstore: single month-name authority ------------------------------------
@@ -460,51 +470,51 @@ def test_threads_page_no_literal_unicode_escape():
 
 
 def test_page_escapes_meta_description_and_title_once():
-    p = generate.page('A & B', 'body', desc='He said "x" & left')
+    p = pagelib.page('A & B', 'body', desc='He said "x" & left')
     assert 'content="He said &quot;x&quot; &amp; left"' in p
     assert "<title>A &amp; B</title>" in p          # escaped exactly once
 
 
 def test_page_canonical_only_with_base():
-    old = generate._BASE
+    old = pagelib._BASE
     try:
-        generate._BASE = ""
-        assert "rel=canonical" not in generate.page("t", "b", canon="x.html")
-        generate._BASE = "https://example.org/site"
+        pagelib._BASE = ""
+        assert "rel=canonical" not in pagelib.page("t", "b", canon="x.html")
+        pagelib._BASE = "https://example.org/site"
         assert ("<link rel=canonical href='https://example.org/site/x.html'>"
-                in generate.page("t", "b", canon="x.html"))
+                in pagelib.page("t", "b", canon="x.html"))
     finally:
-        generate._BASE = old
+        pagelib._BASE = old
 
 
 def test_github_base_derivation(monkeypatch):
     monkeypatch.setenv("GITHUB_REPOSITORY", "Some-Org/some-repo")
-    assert generate._github_base() == "https://some-org.github.io/some-repo"
+    assert pagelib._github_base() == "https://some-org.github.io/some-repo"
     monkeypatch.setenv("GITHUB_REPOSITORY", "User/user.github.io")
-    assert generate._github_base() == "https://user.github.io"
+    assert pagelib._github_base() == "https://user.github.io"
     monkeypatch.delenv("GITHUB_REPOSITORY")
-    assert generate._github_base() == ""
+    assert pagelib._github_base() == ""
 
 
 def test_sitemap_single_and_chunked(tmp_path):
-    old = generate._BASE
+    old = pagelib._BASE
     try:
-        generate._BASE = "https://example.org/site"
-        generate._write_sitemaps(tmp_path, ["", "a.html"])
+        pagelib._BASE = "https://example.org/site"
+        pagelib._write_sitemaps(tmp_path, ["", "a.html"])
         sm = (tmp_path / "sitemap.xml").read_text("utf-8")
         assert "<urlset" in sm
         assert "<loc>https://example.org/site/a.html</loc>" in sm
         assert "<loc>https://example.org/site/</loc>" in sm
-        generate._write_sitemaps(
+        pagelib._write_sitemaps(
             tmp_path, [f"m{i}.html" for i in range(7)], chunk=3)
         idx = (tmp_path / "sitemap.xml").read_text("utf-8")
         assert "<sitemapindex" in idx
         assert (tmp_path / "sitemap-3.xml").exists()
         # a re-run with fewer parts prunes the stale ones
-        generate._write_sitemaps(tmp_path, ["a.html"])
+        pagelib._write_sitemaps(tmp_path, ["a.html"])
         assert not (tmp_path / "sitemap-1.xml").exists()
     finally:
-        generate._BASE = old
+        pagelib._BASE = old
 
 
 # --- render_body.render_plain (bullets + wrapped-quote re-attach) -----------------
@@ -644,7 +654,8 @@ def test_vaultcache_roundtrip_and_noop(tmp_path):
     build, vault = str(tmp_path / "b.db"), str(tmp_path / "v.db")
     c = _mk(build)
     c.execute("INSERT INTO t (url, data) VALUES ('u1','a'),('u2','b')")
-    c.commit(); c.close()
+    c.commit()
+    c.close()
 
     assert vaultcache.sync(build, vault, "t", "url") == 2       # build -> vault
     h = hashlib.md5(open(vault, "rb").read()).hexdigest()

@@ -48,6 +48,9 @@ use Node.js.
 | `fetch_scrubbed_html.py` | recover Pipermail HTML-only bodies; privately cache sanitized, decoded, and byte-exact source forms |
 | `import_mbox.py` | import a local mbox export (fills the post-Pipermail gap) |
 | `generate.py` | render `site/` (index, search, per-month date/thread/subject/author + mbox.gz, per-message) |
+| `pagelib.py` | page chrome (CSS/JS, hashed asset names) + shared HTML/list-row helpers |
+| `search_index.py` | search page template + search-index.json / body-index.json.gz writers |
+| `month_pages.py` | per-month pages, accordion fragments and downloadable mbox.gz |
 | `build.sh` | portable build: DB → `site/` (no GitHub/CI assumptions) |
 | `pack-db.sh` | repack `archive.db.gz` only when message content changed |
 | `obfuscate.py` | replace personal emails with irreversible pseudonyms |

@@ -238,10 +238,10 @@ def _plan(full, prior):
 
     nw = [0] * len(lines)                       # words / covered words per line
     nc = [0] * len(lines)
-    for i, (_, l) in enumerate(toks):
-        nw[l] += 1
+    for i, (_, ln) in enumerate(toks):
+        nw[ln] += 1
         if cov[i] is not None:
-            nc[l] += 1
+            nc[ln] += 1
 
     blank = [not text.strip() for _, _, text in lines]
     header_furn = _header_furniture(lines)
