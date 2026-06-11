@@ -592,7 +592,113 @@ def _is_text_member(b: bytes) -> bool:
     return printable / len(b) > 0.85
 
 
-def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
+def _gzip_fname(content: bytes):
+    """The original filename in a gzip header (FLG.FNAME), or None. gzip stores
+    it NUL-terminated after the 10-byte header (and any FEXTRA field)."""
+    if len(content) < 10 or content[:2] != b"\x1f\x8b":
+        return None
+    flg = content[3]
+    if not flg & 0x08:                       # FNAME flag not set
+        return None
+    idx = 10
+    if flg & 0x04:                           # FEXTRA: skip XLEN + extra field
+        if idx + 2 > len(content):
+            return None
+        xlen = content[idx] | (content[idx + 1] << 8)
+        idx += 2 + xlen
+    end = content.find(b"\x00", idx)
+    return content[idx:end] if end != -1 else None
+
+
+def _archive_names(content: bytes, depth: int = 0, budget=None):
+    """Recursively collect member FILENAMES + COMMENTS (and the gzip FNAME) of a
+    gz/zip/tar container as byte-strings, so _member_unsafe can be run over the
+    archive's STRUCTURE -- PII that lives only in a filename or comment, never in
+    member content. Returns the list, or None when the container can't be fully
+    and safely walked (mirrors _inspect: None ALWAYS means withhold)."""
+    if budget is None:
+        budget = [_ARCH_MAX_MEMBERS, _ARCH_MAX_BYTES]
+    if depth > _ARCH_MAX_DEPTH:
+        return None
+    names: list = []
+    if content[:2] == b"\x1f\x8b":                       # gzip
+        fname = _gzip_fname(content)
+        if fname:
+            names.append(fname)
+        inner = _bounded_gunzip(content, budget[1])
+        if inner is None:
+            return None
+        budget[1] -= len(inner)
+        sub = _archive_names(inner, depth + 1, budget)
+        return None if sub is None else names + sub
+    if content[:4] == b"PK\x03\x04":                     # zip
+        try:
+            z = zipfile.ZipFile(io.BytesIO(content))
+            infos = z.infolist()
+        except Exception:  # noqa: BLE001
+            return None
+        if any(i.flag_bits & 0x1 for i in infos):        # encrypted
+            return None
+        if z.comment:
+            names.append(z.comment)
+        for zi in infos:
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            names.append(zi.filename.encode("utf-8", "replace"))
+            if zi.comment:
+                names.append(zi.comment)
+            if zi.is_dir():
+                continue
+            if zi.file_size > budget[1] or (
+                    zi.compress_size and
+                    zi.file_size / zi.compress_size > _ARCH_MAX_RATIO):
+                return None
+            try:
+                data = z.read(zi)
+            except Exception:  # noqa: BLE001
+                return None
+            budget[1] -= len(data)
+            if budget[1] < 0:
+                return None
+            if _is_container(data):
+                sub = _archive_names(data, depth + 1, budget)
+                if sub is None:
+                    return None
+                names.extend(sub)
+        return names
+    try:                                                 # tar (any compression)
+        t = tarfile.open(fileobj=io.BytesIO(content))
+    except Exception:  # noqa: BLE001
+        return names                                     # not a container -> leaf
+    try:
+        for mb in t.getmembers():
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            names.append(mb.name.encode("utf-8", "replace"))
+            if not mb.isfile():
+                continue
+            if mb.size > budget[1]:
+                return None
+            f = t.extractfile(mb)
+            if f is None:
+                return None
+            data = f.read()
+            budget[1] -= len(data)
+            if budget[1] < 0:
+                return None
+            if _is_container(data):
+                sub = _archive_names(data, depth + 1, budget)
+                if sub is None:
+                    return None
+                names.extend(sub)
+    except Exception:  # noqa: BLE001
+        return None
+    return names
+
+
+def _clean_archive(data: bytes, blob, text=None, depth: int = 0, budget=None):
     """Rebuild a gz/zip/tar archive with addresses scrubbed, DETERMINISTICALLY
     (fixed mtimes/owners/order) so identical input -> identical bytes. Returns
     (bytes, ok); ok=False means it cannot be safely sanitised -- a binary member
@@ -603,12 +709,24 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
         budget = [_ARCH_MAX_MEMBERS, _ARCH_MAX_BYTES]
     if depth > _ARCH_MAX_DEPTH:
         return data, False
+
+    def _name(n):
+        """Pseudonymise an address embedded in a member name/comment. Uses the
+        text scrubber when supplied; else the byte scrubber (the transfer-encoded
+        caller passes no text)."""
+        if not n:
+            return n
+        if isinstance(n, (bytes, bytearray)):
+            return blob(bytes(n))
+        return text(n) if text is not None else \
+            blob(n.encode("utf-8", "replace")).decode("utf-8", "replace")
+
     if data[:2] == b"\x1f\x8b":                          # gzip (incl. tar.gz)
         inner = _bounded_gunzip(data, budget[1])         # capped BEFORE materialise
         if inner is None:
             return data, False
         budget[1] -= len(inner)
-        red, ok = _clean_archive(inner, blob, depth + 1, budget)
+        red, ok = _clean_archive(inner, blob, text, depth + 1, budget)
         if not ok:
             return data, False
         buf = io.BytesIO()
@@ -640,10 +758,11 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
                     budget[1] -= len(member)
                     if budget[1] < 0:
                         return data, False
-                    red, ok = _clean_archive(member, blob, depth + 1, budget)
+                    red, ok = _clean_archive(member, blob, text, depth + 1,
+                                             budget)
                     if not ok:
                         return data, False
-                    z.writestr(zipfile.ZipInfo(i.filename), red)   # fixed 1980 ts
+                    z.writestr(zipfile.ZipInfo(_name(i.filename)), red)  # name scrubbed
         except Exception:  # noqa: BLE001
             return data, False
         return out.getvalue(), True
@@ -667,9 +786,11 @@ def _clean_archive(data: bytes, blob, depth: int = 0, budget=None):
                     budget[1] -= len(member)
                     if budget[1] < 0:
                         return data, False
-                    red, ok = _clean_archive(member, blob, depth + 1, budget)
+                    red, ok = _clean_archive(member, blob, text, depth + 1,
+                                             budget)
                     if not ok:
                         return data, False
+                    mb.name = _name(mb.name)             # scrub PII in the path
                     mb.size = len(red)
                     mb.mtime = 0
                     mb.uid = mb.gid = 0
@@ -933,13 +1054,21 @@ def obfuscate(db: str) -> None:
             # and publish only if a second full scan is clean; else WITHHOLD. The
             # original is always preserved in the private vault.
             members = _inspect(content)
-            if members is None:
+            names = _archive_names(content)
+            if members is None or names is None:
                 withhold = True
-            elif any(_member_unsafe(m) for m in members):
-                cleaned, ok = _clean_archive(content, blob)
-                rescan = _inspect(cleaned) if ok else None
-                if ok and rescan is not None and not any(
-                        _member_unsafe(m) for m in rescan):
+            elif (any(_member_unsafe(m) for m in members)
+                  or any(_member_unsafe(n) for n in names)):
+                # PII in member CONTENT or in a filename/comment: rebuild with
+                # both scrubbed (pass `text` so member names get pseudonymised),
+                # and publish only if a second FULL scan -- content AND names --
+                # comes back clean; else withhold.
+                cleaned, ok = _clean_archive(content, blob, text)
+                rmembers = _inspect(cleaned) if ok else None
+                rnames = _archive_names(cleaned) if ok else None
+                if (ok and rmembers is not None and rnames is not None
+                        and not any(_member_unsafe(m) for m in rmembers)
+                        and not any(_member_unsafe(n) for n in rnames)):
                     conn.execute(
                         "UPDATE attachment SET content=?, size=? WHERE id=?",
                         (cleaned, len(cleaned), aid))

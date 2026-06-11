@@ -63,4 +63,12 @@ def gunzip_bounded(data: bytes, limit: int) -> bytes:
     out += d.flush()
     if len(out) > limit:
         raise ValueError(f"gzip expands beyond {limit} bytes")
+    # Reject an incomplete or tampered stream rather than silently returning a
+    # partial month: a truncated .gz leaves eof False, and bytes after the first
+    # member (concatenation / trailing junk) land in unused_data. Pipermail mboxes
+    # are single-member, so both are anomalies that must abort the fetch.
+    if not d.eof:
+        raise ValueError("truncated gzip stream")
+    if d.unused_data:
+        raise ValueError("unexpected trailing data after gzip stream")
     return bytes(out)

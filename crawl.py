@@ -58,9 +58,16 @@ def store(conn: sqlite3.Connection, month: str, rows: list[dict]) -> int:
     # Pipermail, so this is below the parsed count for months with dupes.
     # Only delete this crawler's own rows so imported sources (e.g. an mbox
     # import) sharing the month are preserved.
-    conn.execute("DELETE FROM message WHERE month = ? AND source = 'list'",
-                 (month,))
-    return mailstore.insert_rows(conn, rows)
+    # DELETE + re-INSERT must be atomic: an insert that raises mid-batch must
+    # not leave the month emptied or partial. insert_rows commits on success
+    # (so DELETE and INSERT land together); on failure roll the DELETE back too.
+    try:
+        conn.execute("DELETE FROM message WHERE month = ? AND source = 'list'",
+                     (month,))
+        return mailstore.insert_rows(conn, rows)
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def main() -> None:

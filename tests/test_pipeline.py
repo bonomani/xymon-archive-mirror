@@ -545,15 +545,43 @@ def test_render_plain_rejoins_orphan_bullet():
 
 def test_threads_groups_by_reply_and_subject():
     rows = [
-        {"id": 1, "msgid": "<a>", "in_reply_to": None, "subject": "Disk alert"},
-        {"id": 2, "msgid": "<b>", "in_reply_to": "<a>", "subject": "Re: x"},
-        {"id": 3, "msgid": "<c>", "in_reply_to": None, "subject": "Disk alert"},
-        {"id": 4, "msgid": "<d>", "in_reply_to": None, "subject": "unrelated"},
+        {"id": 1, "msgid": "<a>", "in_reply_to": None, "subject": "Disk alert",
+         "date_iso": "2024-01-01T00:00:00"},
+        {"id": 2, "msgid": "<b>", "in_reply_to": "<a>", "subject": "Re: x",
+         "date_iso": "2024-01-02T00:00:00"},
+        {"id": 3, "msgid": "<c>", "in_reply_to": None, "subject": "Disk alert",
+         "date_iso": "2024-01-10T00:00:00"},   # shares subject, within window
+        {"id": 4, "msgid": "<d>", "in_reply_to": None, "subject": "unrelated",
+         "date_iso": "2024-01-03T00:00:00"},
     ]
     comp = threads.components(rows)
     sets = sorted(sorted(r["id"] for r in m) for m in comp.values())
     assert [1, 2, 3] in sets        # 2 replies to 1; 3 shares subject with 1
     assert [4] in sets              # 4 stands alone
+
+
+def test_threads_subject_merge_is_time_bounded():
+    # A subject reused far apart in time is a NEW conversation, not a
+    # continuation -- it must NOT fuse into one thread (the cross-year bug).
+    far = [
+        {"id": 1, "msgid": "<a>", "in_reply_to": None,
+         "subject": "Feature request", "date_iso": "2005-03-01T00:00:00"},
+        {"id": 2, "msgid": "<b>", "in_reply_to": None,
+         "subject": "Feature request", "date_iso": "2022-09-01T00:00:00"},
+    ]
+    assert len(threads.components(far)) == 2          # not fused across 17 years
+
+    # A slow but continuous thread (each step < 90 days) chains into ONE
+    # component however long the total span.
+    near = [
+        {"id": 1, "msgid": "<a>", "in_reply_to": None,
+         "subject": "Feature request", "date_iso": "2024-01-01T00:00:00"},
+        {"id": 2, "msgid": "<b>", "in_reply_to": None,
+         "subject": "Feature request", "date_iso": "2024-03-01T00:00:00"},
+        {"id": 3, "msgid": "<c>", "in_reply_to": None,
+         "subject": "Feature request", "date_iso": "2024-05-01T00:00:00"},
+    ]
+    assert len(threads.components(near)) == 1          # chained within window
 
 
 def test_threads_short_subject_not_grouped():
@@ -1089,3 +1117,256 @@ def test_gh_discussion_sanitizes_bodyhtml():
     bh = mailstore.gh_discussion_rows(disc)[0]["body_html"]
     assert "<script" not in bh.lower() and "alert(1)" not in bh
     assert "hi" in bh
+
+
+# --- security findings 2026-06: regression locks -----------------------------
+
+def _msg(**kw):
+    base = dict(month="2026-June", msgid="<x@h>", in_reply_to=None,
+                subject="A subject line here", from_name="Ann",
+                from_email="user-x@xymon.invalid",
+                date_iso="2026-06-01T10:00:00+00:00",
+                date_raw="Mon, 1 Jun 2026 10:00:00 -0000",
+                body="hello", source="list", body_html=None, raw=None)
+    base.update(kw)
+    return base
+
+
+def test_build_escapes_malformed_date_header(tmp_path):
+    # A <script> in the Date header reaches short_date() when date_iso is NULL;
+    # the month page + fragment must escape it (stored-XSS fix, finding 1).
+    db, out = tmp_path / "x.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [_msg(
+        msgid="<evil@h>", date_iso=None,
+        date_raw="<script>alert(document.domain)</script>")])
+    conn.commit()
+    conn.close()
+    generate.build(db, out)
+    for name in ("2026-June.html", "frag/2026-June.html"):
+        page = (out / name).read_text("utf-8")
+        assert "<script>alert(document.domain)</script>" not in page
+        assert "&lt;script&gt;" in page
+
+
+def test_build_sweeps_orphan_pages(tmp_path):
+    # Deleting every message of a month must remove its month/frag/msg pages
+    # from the rendered site, not leave them as ghosts (finding 2).
+    db, out = tmp_path / "s.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [
+        _msg(month="2026-May", msgid="<a@h>", subject="May topic alpha",
+             date_iso="2026-05-01T10:00:00+00:00"),
+        _msg(month="2026-June", msgid="<b@h>", subject="June topic beta")])
+    conn.commit()
+    conn.close()
+    generate.build(db, out)
+    a_stem = generate.msg_name({"msgid": "<a@h>", "id": 1})
+    assert (out / "2026-May.html").exists()
+    assert (out / "frag" / "2026-May.html").exists()
+    assert (out / "msg" / f"{a_stem}.html").exists()
+    conn = mailstore.connect(str(db))
+    conn.execute("DELETE FROM message WHERE month='2026-May'")
+    conn.commit()
+    conn.close()
+    generate.build(db, out)
+    assert not (out / "2026-May.html").exists()
+    assert not (out / "frag" / "2026-May.html").exists()
+    assert not (out / "msg" / f"{a_stem}.html").exists()
+    assert (out / "2026-June.html").exists()           # survivor kept
+
+
+def test_incremental_rerenders_on_samesize_attachment_change(tmp_path,
+                                                             monkeypatch):
+    # A same-SIZE attachment content change used to share the old incremental
+    # signature, so the thread was skipped while the sweep deleted its file ->
+    # stale page + broken link. The signature now folds in the content digest
+    # (finding 3).
+    db, out = tmp_path / "i.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [_msg(msgid="<att@h>", subject="Has attach here")])
+    conn.execute(
+        "INSERT INTO attachment (msgid, month, url, filename, content_type, "
+        "size, content) VALUES "
+        "('<att@h>','2026-June','u','a.txt','text/plain',?,?)", (4, b"AAAA"))
+    conn.commit()
+    conn.close()
+    generate.build(db, out)                  # full build writes the manifest
+    old_dir = hashlib.sha1(b"AAAA").hexdigest()[:16]
+    (thread_page,) = list((out / "thread").glob("*.html"))
+    assert old_dir in thread_page.read_text("utf-8")
+    conn = mailstore.connect(str(db))
+    conn.execute("UPDATE attachment SET content=? WHERE filename='a.txt'",
+                 (b"BBBB",))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("INCREMENTAL", "1")
+    generate.build(db, out)
+    new_dir = hashlib.sha1(b"BBBB").hexdigest()[:16]
+    page = thread_page.read_text("utf-8")
+    assert new_dir in page                   # re-rendered with the new link
+    assert old_dir not in page
+    assert (out / "att" / new_dir / "a.txt").exists()
+    assert not (out / "att" / old_dir).exists()   # sweep removed the stale dir
+
+
+def test_standalone_db_groups_parent_and_reply(tmp_path):
+    # A plain DB (no thread_id column) must still produce ONE multi-message
+    # thread page for a parent + reply, not two singletons (finding 5).
+    db, out = tmp_path / "t.db", tmp_path / "site"
+    conn = mailstore.connect(str(db))
+    mailstore.insert_rows(conn, [
+        _msg(msgid="<p@h>", in_reply_to=None, subject="Parent topic here",
+             body="parent body text"),
+        _msg(msgid="<r@h>", in_reply_to="<p@h>", subject="Re: Parent topic here",
+             date_iso="2026-06-02T10:00:00+00:00", body="reply body text")])
+    conn.commit()
+    conn.close()
+    cols = {r[1] for r in sqlite3.connect(str(db)).execute(
+        "PRAGMA table_info(message)")}
+    assert "thread_id" not in cols
+    generate.build(db, out)
+    pages = list((out / "thread").glob("*.html"))
+    assert len(pages) == 1                    # one thread, not two
+    html_ = pages[0].read_text("utf-8")
+    assert "parent body text" in html_ and "reply body text" in html_
+
+
+def test_imap_checkpoint_stops_at_failed_uid(tmp_path, monkeypatch):
+    # A failed lower UID must not be skipped forever: the checkpoint stops at
+    # the gap so the next run re-fetches it (finding 8).
+    import fetch_mailbox
+
+    def _raw(mid):
+        return (b"Message-Id: " + mid.encode() + b"\r\nSubject: s\r\n"
+                b"Date: Mon, 1 Jun 2026 10:00:00 -0000\r\n\r\nbody\r\n")
+
+    class FakeIMAP:
+        def login(self, u, p):
+            return ("OK", [b""])
+
+        def select(self, f, readonly=False):
+            return ("OK", [b"3"])
+
+        def status(self, f, what):
+            return ("OK", [b'"INBOX" (UIDVALIDITY 100)'])
+
+        def uid(self, cmd, *a):
+            if cmd == "search":
+                return ("OK", [b"1 2 3"])
+            uid = a[0]
+            if uid == "1":
+                return ("OK", [(b"h", _raw("<m1@h>"))])
+            if uid == "2":
+                return ("NO", [None])               # transient failure
+            if uid == "3":
+                return ("OK", [(b"h", _raw("<m3@h>"))])
+            return ("NO", [None])
+
+        def logout(self):
+            return ("OK", [b""])
+
+    monkeypatch.setattr(fetch_mailbox.imaplib, "IMAP4_SSL",
+                        lambda h, p: FakeIMAP())
+    db = str(tmp_path / "imap.db")
+    conn = mailstore.connect(db)
+    seen, added = fetch_mailbox.fetch(conn, "mail.host", "acct", "pw",
+                                      "INBOX", 993)
+    assert (seen, added) == (3, 2)               # 3 listed, UID 1 + 3 stored
+    assert fetch_mailbox.get_last_uid(conn, "INBOX", "mail.host", "acct",
+                                      100) == 1   # NOT advanced past the gap
+    stored = {r[0] for r in conn.execute("SELECT msgid FROM message")}
+    assert stored == {"<m1@h>", "<m3@h>"}
+    # a UIDVALIDITY change invalidates the checkpoint -> re-scan from 0
+    assert fetch_mailbox.get_last_uid(conn, "INBOX", "mail.host", "acct",
+                                      999) == 0
+    conn.close()
+
+
+def test_gunzip_rejects_truncated_and_trailing():
+    # A truncated or multi-member/tampered gzip must abort, not silently return
+    # partial content that overwrites a complete month (finding 9).
+    import gzip as _gz
+
+    import webfetch
+    blob = _gz.compress(b"y" * 500)
+    assert webfetch.gunzip_bounded(blob, 10000) == b"y" * 500
+    for bad in (blob[:-4], blob[:len(blob) // 2], blob + blob,
+                blob + b"trailing-junk"):
+        raised = False
+        try:
+            webfetch.gunzip_bounded(bad, 10000)
+        except ValueError:
+            raised = True
+        assert raised
+
+
+def test_crawl_store_rolls_back_on_insert_failure(tmp_path, monkeypatch):
+    # DELETE + re-INSERT must be atomic: a mid-batch insert failure must not
+    # leave the month emptied (finding 9).
+    import crawl
+    db = str(tmp_path / "crawl.db")
+    conn = mailstore.connect(db)
+    mailstore.insert_rows(conn, [_msg(month="2026-June", msgid="<keep@h>")])
+
+    def boom(*a, **k):
+        raise RuntimeError("insert failed mid-batch")
+
+    monkeypatch.setattr(crawl.mailstore, "insert_rows", boom)
+    raised = False
+    try:
+        crawl.store(conn, "2026-June", [_msg(month="2026-June", msgid="<new@h>")])
+    except RuntimeError:
+        raised = True
+    assert raised
+    kept = {r[0] for r in conn.execute("SELECT msgid FROM message")}
+    assert "<keep@h>" in kept                    # DELETE rolled back
+    conn.close()
+
+
+def test_dbhash_covers_date_raw():
+    # date_raw is displayed; a change to it alone must move the fingerprint so a
+    # corrected DB republishes (finding 11).
+    import os
+    import tempfile
+
+    def h(dr):
+        p = os.path.join(tempfile.mkdtemp(), "d.db")
+        con = sqlite3.connect(p)
+        con.execute("CREATE TABLE message (id INTEGER PRIMARY KEY, month, msgid, "
+                    "in_reply_to, subject, from_name, from_email, date_iso, "
+                    "date_raw, body, source, body_html)")
+        con.execute("INSERT INTO message (month, msgid, body, date_raw) "
+                    "VALUES ('m','<1>','b',?)", (dr,))
+        con.commit()
+        con.close()
+        return dbhash.fingerprint(p)
+
+    assert "date_raw" in dbhash.COLS
+    assert h("Mon, 1 Jan 2024 00:00:00") != h("Tue, 2 Jan 2024 00:00:00")
+
+
+def test_obfuscate_scrubs_pii_in_archive_filename(tmp_path, monkeypatch):
+    # PII present ONLY in a member filename (content clean) must not ship: the
+    # archive is rebuilt with the name scrubbed, or withheld (finding 6).
+    import io as _io
+    import zipfile as _zip
+    monkeypatch.setenv("OBFUSCATE_SALT", "test-salt")
+    buf = _io.BytesIO()
+    z = _zip.ZipFile(buf, "w")
+    z.writestr("realname@acme-corp.com_notes.txt", b"nothing personal here\n")
+    z.close()
+    db = str(tmp_path / "name.db")
+    conn = mailstore.connect(db)
+    _att(conn, "report.zip", buf.getvalue(), "application/zip")
+    conn.commit()
+    conn.close()
+    obfuscate.obfuscate(db)
+    c, obf = sqlite3.connect(db).execute(
+        "SELECT content, obfuscated FROM attachment").fetchone()
+    assert obf == 1
+    assert b"acme-corp.com" not in c             # no PII in the published bytes
+    if c != obfuscate._WITHHELD:
+        names = obfuscate._archive_names(c)
+        assert names is not None
+        assert not any(obfuscate._member_unsafe(n) for n in names)

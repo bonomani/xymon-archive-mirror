@@ -9,15 +9,35 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import Counter, defaultdict
+from datetime import date as _date
 
 _SUBJECT_MINLEN = 8       # shorter subjects are too generic to imply a thread
 _TID_LEN = 12             # hex chars of the thread id (like msg_name)
+_SUBJECT_WINDOW_DAYS = 90  # a subject-only edge chains messages at most this far
+                           # apart; the SAME subject reused months/years later is
+                           # a NEW conversation, not a continuation of the old one
 
 
 def subject_key(subject: str):
     """Normalised subject used as a thread-grouping edge, or None if too short."""
     s = (subject or "").strip().lower()
     return s if len(s) > _SUBJECT_MINLEN else None
+
+
+def _row_day(r):
+    """The message's calendar day from the leading YYYY-MM-DD of date_iso, or
+    None when absent/undated/malformed. Day granularity is enough to bound the
+    subject window and dodges timezone-suffix parsing differences."""
+    try:
+        iso = r["date_iso"]
+    except (KeyError, IndexError):
+        return None                       # caller passed rows without the column
+    if not iso:
+        return None
+    try:
+        return _date.fromisoformat(iso[:10])
+    except (ValueError, TypeError):
+        return None
 
 
 def components(rows):
@@ -42,15 +62,27 @@ def components(rows):
         if irt and irt in by_msgid:
             union(r["id"], by_msgid[irt])
 
-    subj_first: dict[str, int] = {}      # edges from a shared subject
-    for r in rows:
+    # edges from a shared subject, time-bounded. Walk messages oldest-first and
+    # chain each to the MOST RECENT same-subject message, but only when they are
+    # within _SUBJECT_WINDOW_DAYS. A genuinely slow thread (each reply < window
+    # after the last) stays one component however long its total span; two
+    # messages that merely reuse a subject years apart do not merge. Undated
+    # messages carry no datable edge (reply links still apply).
+    day_of = {r["id"]: _row_day(r) for r in rows}
+    subj_prev: dict[str, int] = {}       # subject_key -> id of newest dated msg
+    for r in sorted(rows, key=lambda x: (day_of[x["id"]] is None,
+                                         day_of[x["id"]] or _date.min,
+                                         x["id"])):
         k = subject_key(r["subject"])
         if k is None:
             continue
-        if k in subj_first:
-            union(r["id"], subj_first[k])
-        else:
-            subj_first[k] = r["id"]
+        d = day_of[r["id"]]
+        if d is None:
+            continue
+        prev = subj_prev.get(k)
+        if prev is not None and (d - day_of[prev]).days <= _SUBJECT_WINDOW_DAYS:
+            union(r["id"], prev)
+        subj_prev[k] = r["id"]
 
     comp: dict[int, list] = defaultdict(list)
     for r in rows:

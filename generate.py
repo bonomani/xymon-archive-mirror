@@ -786,7 +786,7 @@ def _xp(r) -> str:
             f"href='msg/{msg_name(r)}.html'")
 
 
-def _msg_line(r, att_counts) -> str:
+def _msg_line(r, att_counts, htid=None) -> str:
     """One message list row in the site-wide .sline grammar -- the SAME
     structure script.js's lineEl() builds for search results and the Threads
     tab (a ui_test asserts the contract): subject expand-toggle, then
@@ -794,12 +794,18 @@ def _msg_line(r, att_counts) -> str:
     icons. Month pages show date+time (within one month, time IS the order);
     the JS surfaces slice to the date."""
     mid = msg_name(r)
-    tid = r["thread_id"] if "thread_id" in r.keys() else None
+    # With a thread_id column (production) honour it exactly -- a null stays a
+    # plain msg link, matching the thread pass. Only a DB WITHOUT the column
+    # (standalone) falls back to the computed stable thread id (htid).
+    if "thread_id" in r.keys():
+        tid = r["thread_id"]
+    else:
+        tid = htid.get(r["id"]) if htid else None
     thref = f"thread/{tid}.html#m-{mid}" if tid else f"msg/{mid}.html"
     return (f"<li><div class=sline><a {_xp(r)}>"
             f"{e(r['subject']) or '(no subject)'}</a>"
             f"<span class=meta> &middot; {e(whom(r))} &middot; "
-            f"{short_date(r)}</span>"
+            f"{e(short_date(r))}</span>"
             f"{_clip(att_counts.get(r['msgid'], 0))}"
             f"<span class=plinks>"
             f"<a class=plink href='{thref}' title='Open the thread' "
@@ -1035,6 +1041,42 @@ def _sweep_att(out: Path, atts_by_msgid) -> None:
                 if f.name not in expected[d.name]:
                     f.unlink()
 
+
+# A generated per-month artifact: "2024-January.html", "2024-January.txt.gz",
+# or the undated "unknown.*" bucket. Deliberately strict so the root's
+# index*.html / 404.html / sitemap.xml / robots.txt / hashed assets never match.
+_MONTH_FILE = re.compile(r"^(\d{4}-[A-Za-z]+|unknown)\.(?:html|txt\.gz)$")
+
+
+def _sweep_pages(out: Path, conn, months) -> None:
+    """Delete generated pages whose source rows/months are gone from the DB.
+
+    The incremental render rewrites only changed threads and never removes the
+    msg/, frag/, month or mbox files of deleted messages, so they linger in the
+    CI-cached site and ship as ghost pages (a deleted message stayed reachable
+    at its old msg/<id>.html). Like _sweep_att, the expected set spans the WHOLE
+    DB, independent of the incremental skip, so cached files of skipped threads
+    survive while orphans are pruned."""
+    expected_msg = {msg_name(r)
+                    for r in conn.execute("SELECT id, msgid FROM message")}
+    msgdir = out / "msg"
+    if msgdir.exists():
+        for f in msgdir.glob("*.html"):
+            if f.stem not in expected_msg:
+                f.unlink()
+    monthset = set(months)
+    fragdir = out / "frag"
+    if fragdir.exists():
+        for f in fragdir.glob("*.html"):
+            if f.stem not in monthset:
+                f.unlink()
+    for f in out.iterdir():           # root month pages + downloadable mbox
+        if f.is_file():
+            m = _MONTH_FILE.match(f.name)
+            if m and m.group(1) not in monthset:
+                f.unlink()
+
+
 # The four index tabs (label, href) in display order; the Search tab is the
 # site root. One list feeds the tab bar, the page writer AND the sitemap, so
 # a new tab cannot be added to one and forgotten in another.
@@ -1071,11 +1113,13 @@ def build(db: Path, out: Path, base_url: str = "") -> None:
 
     _write_index_tabs(conn, out, counts, years, total, span,
                       att_msg_per_month)
-    tid_of = _search_grouping(conn)
-    sidx = _write_search_indexes(conn, out, has_tid, att_counts, tid_of)
-    _write_month_pages(conn, out, months, att_counts, has_tid)
-    bythread = _write_thread_pages(conn, out, has_tid, atts_by_msgid)
+    tid_of, htid_of = _search_grouping(conn)
+    sidx = _write_search_indexes(conn, out, has_tid, att_counts, tid_of,
+                                 htid_of)
+    _write_month_pages(conn, out, months, att_counts, has_tid, htid_of)
+    bythread = _write_thread_pages(conn, out, has_tid, atts_by_msgid, htid_of)
     _sweep_att(out, atts_by_msgid)
+    _sweep_pages(out, conn, months)
     _write_seo(out, months, bythread, sidx)
     conn.close()
     print(f"Generated site in {out}/ ({len(months)} months)")
@@ -1238,25 +1282,41 @@ def _write_index_tabs(conn, out: Path, counts, years, total, span,
                  canon="" if href == "index.html" else href), "utf-8")
 
 
-def _search_grouping(conn) -> dict:
-    """Per-message thread-group key (reply links + shared distinctive
-    subject), so the client can group search hits under their thread. Same
-    grouping as the month tree: threads.components(). The [5] key only needs
-    the partition, numbered in row order, so the output is stable across
-    implementations."""
+def _search_grouping(conn):
+    """Group messages into threads once (reply links + a date-bounded shared
+    subject, threads.components()) and return two views:
+
+      tid_of  -- per-message numeric partition key, numbered in row order, so
+                 the client can cluster search hits under their thread ([5]).
+      htid_of -- per-message STABLE hex thread id (anchored on the earliest
+                 message's Message-Id). A DB without a thread_id column (the
+                 standalone public pipeline) uses this so a parent and its
+                 reply share one multi-message thread page and link to it;
+                 production supplies thread_id and ignores htid_of.
+
+    date_iso is selected because the subject-merge edge is now time-bounded
+    (threads.components)."""
     trows = conn.execute(
-        "SELECT id, msgid, in_reply_to, subject FROM message").fetchall()
-    group_of = {r["id"]: root
-                for root, members in threads.components(trows).items()
+        "SELECT id, msgid, in_reply_to, subject, date_iso FROM message"
+    ).fetchall()
+    comps = threads.components(trows)
+    group_of = {r["id"]: root for root, members in comps.items()
                 for r in members}
     roots, tid_of = {}, {}
     for r in trows:
         tid_of[r["id"]] = roots.setdefault(group_of[r["id"]], len(roots))
-    return tid_of
+    htid_of = {}
+    for members in comps.values():
+        anchor = min(members, key=threads.order)
+        htid = (threads.stable_id(anchor["msgid"], threads._TID_LEN)
+                if anchor["msgid"] else f"x{anchor['id']}")
+        for r in members:
+            htid_of[r["id"]] = htid
+    return tid_of, htid_of
 
 
 def _write_search_indexes(conn, out: Path, has_tid, att_counts,
-                          tid_of) -> list:
+                          tid_of, htid_of) -> list:
     """Write search-index.json + body-index.json.gz; returns the rows (sidx)
     so the sitemap can enumerate the msg/ pages."""
     # ---- search indexes (dependency-free client side):
@@ -1286,7 +1346,8 @@ def _write_search_indexes(conn, out: Path, has_tid, att_counts,
             (r["date_iso"] or "")[:16].replace("T", " "),
             att_counts.get(r["msgid"], 0),
             tid_of[r["id"]],                       # [5] grouping key (per build)
-            r["thread_id"] if has_tid else ""])    # [6] stable thread/<tid> link
+            r["thread_id"] if has_tid                # [6] stable thread/<tid> link
+            else htid_of.get(r["id"], "")])
         b = (r["body"] or "").replace("\r\n", "\n").replace("\r", "\n")
         b = strip_footer(strip_scrub_notes(b))
         # Flatten: drop per-line ">" markers and collapse line breaks, so a quote
@@ -1346,7 +1407,8 @@ def _read_manifest(out: Path):
     return manifest_path, old_threads, incremental
 
 
-def _write_month_pages(conn, out: Path, months, att_counts, has_tid) -> None:
+def _write_month_pages(conn, out: Path, months, att_counts, has_tid,
+                       htid_of=None) -> None:
     """Per-month pages + accordion fragments + downloadable mbox.gz (the
     per-message pages were dropped; see the thread pass)."""
     for m in months:
@@ -1357,7 +1419,8 @@ def _write_month_pages(conn, out: Path, months, att_counts, has_tid) -> None:
                ORDER BY date_iso IS NULL, date_iso, id""", (m,)).fetchall()
 
         def flat_list(ordered) -> str:
-            out_ = "".join(_msg_line(r, att_counts) + "</li>" for r in ordered)
+            out_ = "".join(_msg_line(r, att_counts, htid_of) + "</li>"
+                           for r in ordered)
             return f"<ul class=mlist>{out_}</ul>"
 
         # Single view: messages by date. The sort switcher (date / threaded /
@@ -1391,7 +1454,8 @@ def _write_month_pages(conn, out: Path, months, att_counts, has_tid) -> None:
             f"<p class=meta>{len(rows)} messages</p>{content}", "utf-8")
 
 
-def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
+def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid,
+                        htid_of=None) -> dict:
     """Thread pages: ONE page per thread, every message in order, each a
     collapsible <details> block anchored #m-<id> (that anchor IS the message
     permalink); the canonical msg/ pages are written alongside. Carries the
@@ -1402,7 +1466,12 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
     (out / "thread").mkdir(exist_ok=True)
     bythread: dict = defaultdict(list)
     for r in conn.execute("SELECT * FROM message").fetchall():
-        key = (r["thread_id"] if has_tid and r["thread_id"] else msg_name(r))
+        if has_tid and r["thread_id"]:
+            key = r["thread_id"]                # production: enriched thread id
+        elif not has_tid and htid_of:
+            key = htid_of.get(r["id"]) or msg_name(r)   # standalone grouping
+        else:
+            key = msg_name(r)                   # no grouping signal: own page
         bythread[key].append(r)
 
     def _att_block(r, seen=None):
@@ -1454,8 +1523,11 @@ def _write_thread_pages(conn, out: Path, has_tid, atts_by_msgid) -> dict:
             ["\x1f".join([msg_name(r), r["subject"] or "", whom(r),
                           r["from_email"] or "", r["date_raw"] or "",
                           r["source"] or "", r["body"] or "", r["body_html"] or "",
-                          ";".join(f"{a['id']}:{a['size']}:{_att_cid(a) or ''}"
-                                   for a in atts_by_msgid.get(r["msgid"], ()))])
+                          ";".join(
+                              f"{a['id']}:{a['size']}:{_att_cid(a) or ''}:"
+                              f"{_att_dir(a)}:{_safe(a['filename'])}:"
+                              f"{a['content_type'] or ''}"
+                              for a in atts_by_msgid.get(r["msgid"], ()))])
              for r in members])).encode("utf-8", "replace"),
             digest_size=16).hexdigest()
         new_threads[tid] = sig
