@@ -27,6 +27,11 @@ _MOD = 1 << 256
 
 COLS = ("month", "msgid", "in_reply_to", "subject", "from_name",
         "from_email", "date_iso", "body", "source", "body_html", "thread_id",
+        # date_raw IS displayed (month-list rows fall back to it when date_iso is
+        # missing; thread/msg pages always show it). Omitting it meant a fix that
+        # touched only the shown date left the fingerprint unchanged, so pack-db
+        # saw "no change" and never republished -- same trap as `raw` below.
+        "date_raw",
         "archive_source", "source_file",   # provenance: corrections must republish
         # `raw` IS published -- it ships in archive.db.gz and generate.py builds
         # the downloadable per-month mbox from it -- and obfuscate.py rewrites it

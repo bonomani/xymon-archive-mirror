@@ -286,8 +286,11 @@ CREATE INDEX IF NOT EXISTS idx_message_month ON message(month);
 CREATE INDEX IF NOT EXISTS idx_message_date ON message(date_iso);
 
 CREATE TABLE IF NOT EXISTS imap_state (
-    folder   TEXT PRIMARY KEY,
-    last_uid INTEGER NOT NULL
+    folder      TEXT PRIMARY KEY,
+    last_uid    INTEGER NOT NULL,
+    uidvalidity INTEGER,            -- IMAP UIDVALIDITY: a change invalidates UIDs
+    host        TEXT,               -- the checkpoint is meaningless on a different
+    account     TEXT                --   host/account, so it is reset on a mismatch
 );
 
 -- Attachments were scrubbed from the Pipermail mbox and live at external
@@ -321,6 +324,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     acols = {r[1] for r in conn.execute("PRAGMA table_info(attachment)")}
     if acols and "cid" not in acols:
         conn.execute("ALTER TABLE attachment ADD COLUMN cid TEXT")
+    icols = {r[1] for r in conn.execute("PRAGMA table_info(imap_state)")}
+    for col, decl in (("uidvalidity", "INTEGER"), ("host", "TEXT"),
+                      ("account", "TEXT")):
+        if icols and col not in icols:
+            conn.execute(f"ALTER TABLE imap_state ADD COLUMN {col} {decl}")
     conn.commit()
 
 

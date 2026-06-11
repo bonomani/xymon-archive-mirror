@@ -44,6 +44,16 @@ jobs:
       # unfolded thread pages without it, so a stale workflow copy on the
       # 'data' branch still deploys -- but keep this in sync there anyway.
       - run: pip install --quiet lxml==6.0.2
+
+      # Gate the DEPLOY on the Python privacy + pipeline suite too, not just the
+      # JS UI tests below. tests.yml runs this on main/PR, but a 'data'-branch
+      # push (the publish path) never triggers it -- so a failing privacy test
+      # could otherwise ship. A failure here fails the build job and blocks deploy.
+      - name: Python tests (privacy + pipeline)
+        run: |
+          pip install --quiet pytest==9.0.3
+          python -m pytest tests/ -q
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
