@@ -10,8 +10,11 @@ from email import message_from_string
 import hashlib
 import sqlite3
 
+import pytest
+
 import mailstore
 import obfuscate
+import verify_obfuscation
 import generate
 import pagelib
 import render_body
@@ -188,6 +191,88 @@ def test_obfuscate_withholds_binary_archive(tmp_path, monkeypatch):
     (content,) = sqlite3.connect(db).execute(
         "SELECT content FROM attachment").fetchone()
     assert content == obfuscate._WITHHELD
+
+
+# --- obfuscate weak-salt guard -------------------------------------------------
+
+def _weak_salt_db(tmp_path, obfuscated=0):
+    db = str(tmp_path / "salt.db")
+    conn = mailstore.connect(db)
+    conn.execute(
+        "INSERT INTO message (month, msgid, from_email, body) VALUES (?,?,?,?)",
+        ("2024-01", "<1@h>", "someone@acme-corp.com", "hi"))
+    conn.execute("ALTER TABLE message ADD COLUMN obfuscated INTEGER DEFAULT 0")
+    conn.execute("UPDATE message SET obfuscated=?", (obfuscated,))
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_obfuscate_refuses_weak_salt_on_pending_rows(tmp_path, monkeypatch):
+    # the built-in salt is public -> pseudonyms minted with it are dictionary-
+    # attackable; NEW cleartext rows must not be processed with it by default.
+    monkeypatch.delenv("ALLOW_WEAK_SALT", raising=False)
+    monkeypatch.setattr(obfuscate, "get_salt",
+                        lambda: obfuscate._DEFAULT.encode())
+    db = _weak_salt_db(tmp_path)
+    with pytest.raises(SystemExit, match="weak built-in salt"):
+        obfuscate.obfuscate(db)
+    (fe,) = sqlite3.connect(db).execute(
+        "SELECT from_email FROM message").fetchone()
+    assert fe == "someone@acme-corp.com"        # nothing was half-processed
+
+
+def test_obfuscate_weak_salt_explicit_opt_in(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLOW_WEAK_SALT", "1")
+    monkeypatch.setattr(obfuscate, "get_salt",
+                        lambda: obfuscate._DEFAULT.encode())
+    db = _weak_salt_db(tmp_path)
+    obfuscate.obfuscate(db)                     # opted in -> proceeds
+    (fe,) = sqlite3.connect(db).execute(
+        "SELECT from_email FROM message").fetchone()
+    assert fe.endswith("@xymon.invalid")
+
+
+def test_obfuscate_weak_salt_ok_when_nothing_pending(tmp_path, monkeypatch):
+    # the public CI path: every row already carries obfuscated=1, so the weak
+    # default mints nothing and the re-run must keep working without env vars.
+    monkeypatch.delenv("ALLOW_WEAK_SALT", raising=False)
+    monkeypatch.setattr(obfuscate, "get_salt",
+                        lambda: obfuscate._DEFAULT.encode())
+    db = _weak_salt_db(tmp_path, obfuscated=1)
+    obfuscate.obfuscate(db)                     # no exit
+    (fe,) = sqlite3.connect(db).execute(
+        "SELECT from_email FROM message").fetchone()
+    assert fe == "someone@acme-corp.com"        # skipped, untouched
+
+
+# --- verify_obfuscation (the CI privacy gate over the fetched DB) --------------
+
+def test_verify_obfuscation_flags_cleartext(tmp_path):
+    db = str(tmp_path / "leak.db")
+    conn = mailstore.connect(db)
+    conn.execute(
+        "INSERT INTO message (month, msgid, body) VALUES (?,?,?)",
+        ("2024-01", "<1@h>", "reach me: victim@acme-corp.com or "
+                             "victim at acme-corp.com"))
+    conn.commit()
+    conn.close()
+    leaks, _prose = verify_obfuscation.scan(db)
+    assert any("acme-corp.com" in m for _, _, _, m in leaks)
+
+
+def test_verify_obfuscation_accepts_obfuscated_db(tmp_path):
+    db = str(tmp_path / "clean.db")
+    conn = mailstore.connect(db)
+    conn.execute(
+        "INSERT INTO message (month, msgid, from_email, body) VALUES (?,?,?,?)",
+        ("2024-01", "<1@h>", "user-123456789abc@xymon.invalid",
+         "from user-123456789abc@xymon.invalid to xymon@xymon.com; "
+         "docs available at sourceforge.net"))
+    conn.commit()
+    conn.close()
+    leaks, _prose = verify_obfuscation.scan(db)
+    assert leaks == []
 
 
 def test_fetch_scrubbed_html_stores_raw_bytes(tmp_path, monkeypatch):

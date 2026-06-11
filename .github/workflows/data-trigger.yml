@@ -1,0 +1,30 @@
+# Trigger shim carried by the orphan 'data' branch (publish.sh in the private
+# repo copies it from origin/main at publish time, next to archive.db.gz).
+#
+# Workflows run from the PUSHED ref, so when the data branch carried a full
+# copy of pages.yml it went stale between publishes -- on 2026-06-11 the
+# Python privacy/pipeline test gate was on main but missing from the copy the
+# publish path actually ran. This shim has no build logic to drift: it just
+# calls pages.yml as it CURRENTLY exists on main.
+#
+# On main itself this file is inert (a data push runs the data branch's copy;
+# main pushes trigger pages.yml directly).
+name: Build & deploy archive (data publish)
+
+on:
+  push:
+    branches: [data]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Same group as pages.yml so a data publish and a main push serialize.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-deploy:
+    uses: xymon-monitoring/xymon-discussion-public/.github/workflows/pages.yml@main

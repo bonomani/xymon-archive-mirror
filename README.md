@@ -81,7 +81,7 @@ Netlify, or S3).
 
 The private vault currently contributes 233 historical Pipermail files and 19
 HyperKitty monthly files. After overlap deduplication, the published database
-contains 48,501 messages across 251 archive months. HyperKitty supplies the
+contains 48,510 messages across 251 archive months. HyperKitty supplies the
 post-Pipermail period and its richer copy wins any overlapping Message-Id.
 Every published row records which provider and raw source file supplied it.
 
@@ -89,11 +89,13 @@ Every published row records which provider and raw source file supplied it.
 
 Pipermail scrubs attachments out of the mbox, leaving a note linking an
 external URL (under a stale `/pipermail/...` path that must be rewritten).
-`fetch_attachments.py` mirrors only the **useful** types — source, patches,
-scripts, archives, configs — and skips the noise: HTML re-renders (~83%, just
-the body again), images, vcf, and S/MIME/PGP signatures. That trims ~23k
-references / ~250 MB down to ~420 files / ~3 MB, stored as blobs in the DB and
-served from `site/att/`.
+`fetch_attachments.py` mirrors the **useful** types — source, patches,
+scripts, archives, configs, plus screenshot images (capped in size,
+metadata-stripped, verified clean before publication) — and skips the noise:
+HTML re-renders (~83%, just the body again), vcf, and S/MIME/PGP signatures.
+Inline MIME attachments are extracted from the mbox as well. That trims ~23k
+references / ~250 MB down to ~1,050 files / ~26 MB, stored as blobs in the DB
+and served from `site/att/`.
 
 Original attachment bytes are retained only in the private vault, both in
 SQLite and as SHA-256-addressed loose files. Before publication, text and
