@@ -322,3 +322,54 @@ def test_unicode_words_participate_in_quote_proof():
     out = fold_thread(bodies, ["parent", "child"])[1]
     assert len(_folds(out)) == 1
     assert "Мой ответ остается видимым" in _visible(out)
+
+
+# --- furniture: scrap lines between proven quote runs --------------------------
+
+_QUOTE30 = ("alpha beta gamma delta epsilon zeta eta theta iota kappa "
+            "lambda mu nu xi omicron pi rho sigma tau upsilon")
+_TAIL30 = ("phi chi psi omega aleph beth gimel daleth he waw "
+           "zayin heth teth yodh kaph lamedh mem nun samekh ayin")
+
+
+def _refold(scrap):
+    """Child quotes the parent verbatim but with ``scrap`` injected between
+    the two halves (the classic mid-quote relic). Returns the folded child."""
+    parent = f"<div class=pt><pre>{_QUOTE30}\n{_TAIL30}</pre></div>"
+    child = (f"<div class=pt><pre>My reply stays visible.\n"
+             f"{_QUOTE30}\n{scrap}\n{_TAIL30}</pre></div>")
+    return fold_thread([parent, child], ["parent", "child"])[1]
+
+
+def test_no_alnum_line_folds_into_quote():
+    # GCC caret diagnostics / brace relics split folds before; now furniture
+    for scrap in ("| ^~~~~~~ | |", "}", "...", '#'):
+        out = _refold(scrap)
+        assert len(_folds(out)) == 1, scrap
+        assert _visible(out) == "My reply stays visible.", scrap
+
+
+def test_elision_marker_folds_into_quote():
+    for scrap in ("[snip]", "<snip>", "(snipped)", "snip!", "[deleted]"):
+        out = _refold(scrap)
+        assert len(_folds(out)) == 1, scrap
+        assert _visible(out) == "My reply stays visible.", scrap
+
+
+def test_attribution_tail_without_on_prefix_folds():
+    out = _refold("Henrik Stoerner wrote:")
+    assert len(_folds(out)) == 1
+    assert _visible(out) == "My reply stays visible."
+
+
+def test_emoticon_only_line_stays_visible():
+    # a lone smiley is a possible answer, never acceptable fold noise
+    out = _refold(":-)")
+    assert ":-)" in _visible(out)
+
+
+def test_prose_paragraph_ending_in_wrote_stays_visible():
+    long_prose = ("this is a genuine seventeen word long sentence that "
+                  "merely happens to end with the word wrote:")
+    out = _refold(long_prose)
+    assert "merely happens to end" in _visible(out)

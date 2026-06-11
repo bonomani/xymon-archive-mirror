@@ -8,7 +8,8 @@ everything said earlier in its own thread:
   1. words covered by earlier-message 6-word shingles are quote evidence;
   2. a foldable line must have EVERY normalized word covered, or be an
      explicitly recognized quote-furniture line (Outlook headers, an
-     attribution, a separator, or a known external-mail banner);
+     attribution or attribution-shaped tail, a separator, an elision marker,
+     a known external-mail banner, or a line with no alphanumeric content);
   3. maximal safe runs with enough duplicated text become independent folds,
      so an inline answer splits the quote instead of being hidden inside it;
   4. each <details class=q> names the earlier author who contributed most of
@@ -80,6 +81,18 @@ _GATEWAY = re.compile(
     r"|WARNING:\s*This (email|message) (came|originated) from outside"
     r"|\[?EXTERNAL (EMAIL|MESSAGE)\]?)\b", re.I)
 _BARE_QUOTE = re.compile(r"^\s*>+\s*$")
+# an elision marker the quoter left where text was removed: [snip], <snip>,
+# (snipped), [cut], [deleted], [trimmed], or a bare "snip"/"snip!".
+_ELISION = re.compile(
+    r"^\s*(?:[\[<(]\s*(?:sni+p+e?d?|cut|deleted|trimmed|\.\.\.)\s*[\]>)]"
+    r"|sni+p+e?d?!*)\s*$", re.I)
+# attribution SHAPE without the "On ..."/"Le ..." prefix: a short line ending
+# in the quoting verb ("Henrik Stoerner wrote:", "<mailto:...> wrote:").
+_ATTRIB_TAIL = re.compile(
+    r"(?:wrote|writes|schrieb|escribi[oó]|escreveu|skrev|ha scritto"
+    r"|a [eé]crit)\s*:\s*$", re.I)
+# a lone emoticon IS a possible answer -- exempt from the no-alnum rule below.
+_EMOTICON = re.compile(r"[:;8][-^o']?[()\[\]DPpd/\\|]|\(-?[:;]|\^\^|<3")
 
 _BLOCKS = frozenset(
     "p div li blockquote tr pre h1 h2 h3 h4 h5 h6 ul ol table details".split())
@@ -106,9 +119,20 @@ def _norm_word(raw):
 
 
 def _is_furniture(text):
-    return bool(_ATTRIBUTION.search(text)
-                or _SEPARATOR.search(text) or _GATEWAY.search(text)
-                or _BARE_QUOTE.search(text))
+    if (_ATTRIBUTION.search(text)
+            or _SEPARATOR.search(text) or _GATEWAY.search(text)
+            or _BARE_QUOTE.search(text) or _ELISION.search(text)):
+        return True
+    # attribution tail without the "On ..." prefix; the word cap keeps a real
+    # prose paragraph that happens to end in "wrote:" visible.
+    if _ATTRIB_TAIL.search(text) and len(text.split()) <= 16:
+        return True
+    # a non-blank line with NO alphanumeric content (GCC caret diagnostics,
+    # brace/ruler relics, ASCII art) cannot be an answer -- it has no word to
+    # match or to say. Emoticons are the one no-alnum reply, so they stay.
+    s = text.strip()
+    return bool(s and not any(c.isalnum() for c in s)
+                and not _EMOTICON.search(s))
 
 
 def _header_furniture(lines):
