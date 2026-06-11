@@ -13,11 +13,10 @@ on:
     branches: [main, data]    # code change (main) or new DB (data) -> re-render
   schedule:
     - cron: "17 4 * * 1"      # weekly, Monday 04:17 UTC
+  # Manual runs, and data-trigger.yml: the thin shim the 'data' branch carries
+  # instead of a full (drift-prone) copy of this file dispatches THIS workflow
+  # as it currently exists on main whenever a new DB is pushed.
   workflow_dispatch:
-  # Called by data-trigger.yml, the thin shim the 'data' branch carries instead
-  # of a full (drift-prone) copy of this file: a data push always runs THIS
-  # workflow as it currently exists on main.
-  workflow_call:
 
 permissions:
   contents: read          # read-only: the DB is no longer committed back here
