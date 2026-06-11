@@ -2,13 +2,21 @@
 # repo copies it from origin/main at publish time, next to archive.db.gz).
 #
 # Workflows run from the PUSHED ref, so when the data branch carried a full
-# copy of pages.yml it went stale between publishes -- on 2026-06-11 the
-# Python privacy/pipeline test gate was on main but missing from the copy the
-# publish path actually ran. This shim has no build logic to drift: it just
-# calls pages.yml as it CURRENTLY exists on main.
+# copy of pages.yml it went stale between publishes -- gates added on main
+# were missing from the copy the publish path actually ran. This shim has no
+# build logic to drift: it dispatches pages.yml AS IT CURRENTLY EXISTS ON
+# MAIN.
 #
-# On main itself this file is inert (a data push runs the data branch's copy;
-# main pushes trigger pages.yml directly).
+# Why dispatch and not a reusable-workflow call: same-repo `uses:` only
+# accepts the ./ form, which resolves in the PUSHED ref -- the data branch,
+# where pages.yml deliberately does not exist (the owner/repo@ref form is
+# rejected for same-repo references; tried, failed at parse).
+#
+# GITHUB_TOKEN-created events normally don't start new runs, but
+# workflow_dispatch via the API is one of the sanctioned exceptions.
+#
+# On main itself this file is inert (its only trigger is a data push, and a
+# data push runs the data branch's copy of it).
 name: Build & deploy archive (data publish)
 
 on:
@@ -16,15 +24,12 @@ on:
     branches: [data]
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-# Same group as pages.yml so a data publish and a main push serialize.
-concurrency:
-  group: pages
-  cancel-in-progress: false
+  actions: write              # dispatch pages.yml on main
 
 jobs:
-  build-deploy:
-    uses: xymon-monitoring/xymon-discussion-public/.github/workflows/pages.yml@main
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh workflow run pages.yml --ref main --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
