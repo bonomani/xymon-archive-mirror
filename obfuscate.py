@@ -13,7 +13,11 @@ Applies to from_email, subject, body, raw (mbox export) and text attachments,
 i.e. everything that ends up published in archive.db.gz and the static site.
 
 Salt resolution: $OBFUSCATE_SALT, else private/salt.txt, else a weak built-in
-default (with a warning) so it never fails open and leaks cleartext.
+default so it never fails open and leaks cleartext. The default is PUBLIC, so
+pseudonyms minted with it are dictionary-attackable: when rows still need
+obfuscating, running with it is refused unless ALLOW_WEAK_SALT=1 is set
+explicitly. Re-runs over an already-obfuscated DB (the public CI path) have no
+pending rows and proceed with just a warning.
 
     python3 obfuscate.py [archive.db]
 """
@@ -924,6 +928,24 @@ def obfuscate(db: str) -> None:
         if "obfuscated" not in cols:
             conn.execute(
                 f"ALTER TABLE {tbl} ADD COLUMN obfuscated INTEGER DEFAULT 0")
+
+    # Fail closed on the weak built-in salt: it is public (it ships in this
+    # file), so pseudonyms minted with it can be reversed by hashing guessed
+    # addresses. Refuse to pseudonymise NEW cleartext rows with it -- a
+    # third-party redeploy that ingests fresh mail without configuring a salt
+    # must not silently publish dictionary-attackable pseudonyms. The public
+    # CI re-run over the already-obfuscated published DB has no pending rows
+    # and is unaffected.
+    if salt == _DEFAULT.encode():
+        pending = sum(conn.execute(
+            f"SELECT COUNT(*) FROM {tbl} WHERE COALESCE(obfuscated, 0)=0"
+        ).fetchone()[0] for tbl in ("message", "attachment"))
+        if pending and os.environ.get("ALLOW_WEAK_SALT") != "1":
+            sys.exit(
+                f"!! obfuscate: {pending} row(s) need obfuscating but only the "
+                "weak built-in salt is available. Set OBFUSCATE_SALT or "
+                "private/salt.txt (or ALLOW_WEAK_SALT=1 to accept "
+                "dictionary-attackable pseudonyms).")
 
     # Backfill map: a sender who used a real display name on SOME messages but
     # a bare address on others should show that real name everywhere -- not a
