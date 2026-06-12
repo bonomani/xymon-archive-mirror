@@ -188,6 +188,7 @@ function foldQuotes(root){
   // long "flowed" line counts as long. No footer/separator/header line allowed.
   function maybeOpen(d){
     if(!d.querySelector(':scope>summary')) d.insertBefore(qsum(),d.firstChild);  // never show browser default "Details"
+    if(d.classList.contains('sig')){ d.open=false; return; }  // repeated signature: short but never auto-open
     var content=domLines(d).filter(function(l){ return l.replace(/[\\s>\\ufeff]/g,'').length>0; });
     if(content.some(function(l){ return DISC.test(l)||ORIG.test(l)||HDR.test(l); })){ d.open=false; return; }
     var bodyChars=content.filter(function(l){ return !ATTR.test(l); }).join('').replace(/[\\s>]/g,'').length;
@@ -205,6 +206,9 @@ function foldQuotes(root){
     for(var i=1;i<dets.length;i++){
       var a=dets[i-1], b=dets[i];
       if(!a.parentNode||!b.parentNode||a.contains(b)||b.contains(a)){ continue; }
+      // a split-off signature fold keeps its own "signature" label -- merging
+      // it into the neighbouring quote fold would undo the server's split.
+      if(a.classList.contains('sig')||b.classList.contains('sig')) continue;
       // NEVER merge across message bodies: a Range spanning two .tmsg blocks
       // splits the second <details> into a summary-less shell (browsers then
       // show their locale's default label -- "Détails", "Details", ...) and

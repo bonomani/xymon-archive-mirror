@@ -45,13 +45,52 @@ def test_thread_starter_untouched():
     assert folded[0] == bodies[0]          # nothing earlier -> nothing to fold
 
 
-def test_each_reply_gets_one_fold_with_provenance():
+def test_fold_labels_name_the_quoted_author():
+    """Golden labels for the whole thread. Two regressions guarded here:
+    Becker's first reply quotes the ROOT message (its fold opens with
+    ``Von: spiderr``) even though Jaime had re-quoted the same text more
+    recently -- the label must come from the fold's own attribution line,
+    not the coverage histogram's latest re-quoter. And Jaime's repeated
+    msg-1 signature in msg 3 gets its own "signature" fold instead of
+    hiding under "quoted from spiderr"."""
     msgs, _, folded = _thread()
-    for m, fh in zip(msgs[1:], folded[1:]):
-        dets = _folds(fh)
-        assert len(dets) == 1, m["from_name"]
-        label = dets[0].findtext('.//span[@class="meta"]')
-        assert label and label.strip().startswith("quoted from "), label
+    got = [[(d.findtext('.//span[@class="meta"]') or "").strip()
+            for d in _folds(fh)] for fh in folded[1:]]
+    assert got == [
+        ["quoted from spiderr"],                    # Jaime
+        ["quoted from Jaime Kikpole"],              # spiderr
+        ["signature", "quoted from spiderr"],       # Jaime (branch point)
+        ["quoted from spiderr"],                    # Becker, branch reply
+        ["quoted from Becker Christian"],           # Becker, self-quote
+    ], got
+
+
+def test_signature_fold_src_is_who_introduced_it(monkeypatch):
+    """The sig fold's provenance (not rendered, but must not lie) is the
+    author who INTRODUCED the signature -- Jaime in msg 1 -- not spiderr,
+    who merely re-quoted it last in msg 2."""
+    import fold
+    calls = []
+    orig = fold._fold_range
+    monkeypatch.setattr(
+        fold, "_fold_range",
+        lambda body, segs, cut, end, who, kind="q":
+            calls.append((kind, who)) or orig(body, segs, cut, end, who, kind))
+    msgs = json.load(open(FIX))
+    bodies = [body_to_html(m["body"], m["body_html"]) for m in msgs]
+    fold.fold_thread(bodies, [m["from_name"] for m in msgs])
+    assert [w for k, w in calls if k == "sig"] == ["Jaime Kikpole"]
+
+
+def test_signature_fold_is_marked_and_holds_the_signature():
+    """The split-off signature fold carries class="q sig" (the client script
+    must neither merge it away nor auto-open it) and contains the repeated
+    sign-off, which the quote fold's label does not describe."""
+    _, _, folded = _thread()
+    sig, quote = _folds(folded[3])
+    assert sorted(sig.get("class").split()) == ["q", "sig"]
+    assert "Director of Technology" in sig.text_content()
+    assert quote.get("class") == "q"
 
 
 def test_new_text_stays_visible():

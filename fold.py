@@ -12,9 +12,17 @@ everything said earlier in its own thread:
      a known external-mail banner, or a line with no alphanumeric content);
   3. maximal safe runs with enough duplicated text become independent folds,
      so an inline answer splits the quote instead of being hidden inside it;
-  4. each <details class=q> names the earlier author who contributed most of
-     its matched text -- no reliance on In-Reply-To, which is missing/mangled
-     in decades-old mail.
+  4. each <details class=q> names the quoted author: taken from the fold's
+     own leading attribution/From line when it names exactly one earlier
+     author (the coverage histogram points at the LATEST re-quoter, which is
+     wrong for a branch reply answering an old message after its text was
+     re-quoted downstream), else from the earlier message that contributed
+     most of the matched text -- no reliance on In-Reply-To, which is
+     missing/mangled in decades-old mail;
+  5. a short run of the author's OWN earlier words sitting above that
+     attribution line (their repeated signature) becomes a separate
+     <details class="q sig"> labelled "signature", so the quote fold's
+     provenance label never claims text the author wrote themselves.
 
 Validation is deliberately one-sided: any uncovered prose token keeps its
 whole logical line visible. This costs some folds when a mailer has genuinely
@@ -45,6 +53,9 @@ K = 6                     # word-shingle size (matches the client script)
 _MIN_LINE_WORDS = 4       # a shorter line can't prove it is quoted by itself
 _MIN_TAIL_COVERED = 12    # too little duplicated text is not worth a fold
 _MIN_VISIBLE_WORDS = 3    # never fold a message down to less than this
+_MAX_SIG_LINES = 8        # a self-quoted run longer than this is repeated
+                          # content, not a signature -- keep it in the quote
+                          # fold rather than mislabel it "signature"
 
 _WORD = re.compile(r"\S+")
 # C0 control characters (minus \t \n \r): illegal in XML, so lxml refuses to
@@ -135,11 +146,14 @@ def _is_furniture(text):
                 and not _EMOTICON.search(s))
 
 
-def _header_furniture(lines):
+_FROM_FIELDS = frozenset(("from", "von", "de", "da", "van", "fra", "från"))
+
+
+def _header_furniture(lines, matches):
     """Mark only real multi-field mail-header blocks, not lone prose such as
-    ``Subject: use the staging configuration``."""
+    ``Subject: use the staging configuration``. ``matches`` is the per-line
+    _HEADER search result (shared with the attribution-line scan)."""
     marks = [False] * len(lines)
-    matches = [_HEADER.search(text) for _, _, text in lines]
     i = 0
     while i < len(lines):
         if matches[i] is None:
@@ -152,13 +166,27 @@ def _header_furniture(lines):
             i += 1
         names = [matches[j].group(1).casefold() for j in range(start, i + 1)
                  if matches[j] is not None]
-        if len(names) >= 2 and any(
-                name in {"from", "von", "de", "da", "van", "fra", "från"}
-                for name in names):
+        if len(names) >= 2 and any(name in _FROM_FIELDS for name in names):
             for j in range(start, i + 1):
                 marks[j] = True
         i += 1
     return marks
+
+
+def _named_author(text, authors, mi):
+    """Index of the single earlier author named in an attribution/From line,
+    or None. Matching is by normalized author name appearing whole in the
+    normalized line, so 'On Tue ... spiderr <addr> wrote:' and
+    'Von: spiderr <addr>' both resolve; an external name, a mangled name or
+    an ambiguous match (two earlier authors named) falls back to None. Only
+    already-published display names are ever emitted as labels."""
+    hay = f" {' '.join(_norm_words(text))} "
+    hits = {}
+    for idx in range(mi):
+        name = " ".join(_norm_words(authors[idx]))
+        if name and f" {name} " in hay:
+            hits[name] = idx                 # latest earlier message wins
+    return next(iter(hits.values())) if len(hits) == 1 else None
 
 
 # --- rendered-HTML text model -------------------------------------------------
@@ -231,14 +259,31 @@ def _lines(full):
 
 # --- the cut decision -----------------------------------------------------------
 
-def _plan(full, prior):
-    """Return non-overlapping ``(cut, end|None, src_index)`` fold plans.
+def _coverage(ws, table):
+    """Per-word source message: which entry of ``table`` (shingle -> message
+    index) covers each normalized word."""
+    cov = [None] * len(ws)
+    for i in range(len(ws) - K + 1):
+        hit = table.get(" ".join(ws[i:i + K]))
+        if hit is not None:
+            for j in range(i, i + K):
+                if cov[j] is None:
+                    cov[j] = hit
+    return cov
 
-    ``prior`` maps each shingle to the latest earlier message that said it.
-    A line enters a plan only when every normalized word is covered, or the
-    line is explicit quote furniture. Uncovered prose therefore splits runs
-    and remains visible, even when it is only one word or one changed token
-    inside an otherwise copied paragraph.
+
+def _plan(full, prior, authors=(), mi=0, origin=None):
+    """Return non-overlapping ``(cut, end|None, src_index, kind)`` fold
+    plans, kind being "q" (quoted text) or "sig" (the author's repeated
+    signature, split off so the quote label stays truthful).
+
+    ``prior`` maps each shingle to the latest earlier message that said it;
+    ``origin`` to the EARLIEST (who introduced the words -- the signature
+    check needs this, since a re-quote by someone else shadows the latest
+    source). A line enters a plan only when every normalized word is
+    covered, or the line is explicit quote furniture. Uncovered prose
+    therefore splits runs and remains visible, even when it is only one
+    word or one changed token inside an otherwise copied paragraph.
     """
     lines = _lines(full)
     toks = []                                   # (norm_word, line_index)
@@ -251,14 +296,7 @@ def _plan(full, prior):
             li += 1
         toks.append((w, li))
     ws = [t[0] for t in toks]
-
-    cov = [None] * len(ws)                      # source message per covered word
-    for i in range(len(ws) - K + 1):
-        hit = prior.get(" ".join(ws[i:i + K]))
-        if hit is not None:
-            for j in range(i, i + K):
-                if cov[j] is None:
-                    cov[j] = hit
+    cov = _coverage(ws, prior)                  # source message per covered word
 
     nw = [0] * len(lines)                       # words / covered words per line
     nc = [0] * len(lines)
@@ -268,11 +306,28 @@ def _plan(full, prior):
             nc[ln] += 1
 
     blank = [not text.strip() for _, _, text in lines]
-    header_furn = _header_furniture(lines)
+    hmatch = [_HEADER.search(text) for _, _, text in lines]
+    header_furn = _header_furniture(lines, hmatch)
     furn = [header_furn[i] or _is_furniture(text)
             for i, (_, _, text) in enumerate(lines)]
     exact = [nw[i] > 0 and nc[i] == nw[i] for i in range(len(lines))]
     safe = [blank[i] or furn[i] or exact[i] for i in range(len(lines))]
+    # lines that can NAME the quoted author: an "On ... X wrote:" attribution,
+    # a bare "X wrote:" tail, or the From-field of a real header block.
+    attrib = [bool(_ATTRIBUTION.search(t)
+                   or (_ATTRIB_TAIL.search(t) and len(t.split()) <= 16)
+                   or (header_furn[i] and hmatch[i] is not None
+                       and hmatch[i].group(1).casefold() in _FROM_FIELDS))
+              for i, (_, _, t) in enumerate(lines)]
+
+    def _hist_src(a, b, coverage=None):
+        """Dominant earlier message among lines a..b's covered words."""
+        c = cov if coverage is None else coverage
+        sources = {}
+        for ti, (_, line_index) in enumerate(toks):
+            if a <= line_index <= b and c[ti] is not None:
+                sources[c[ti]] = sources.get(c[ti], 0) + 1
+        return max(sources, key=sources.get) if sources else None
 
     planned = []
     i = 0
@@ -307,15 +362,58 @@ def _plan(full, prior):
                               if exact[j])
             if ((covered_lines >= 2 or led or trailing)
                     and (strong_line or covered_lines >= 2)):
-                sources = {}
-                for ti, (_, line_index) in enumerate(toks):
-                    if cut_line <= line_index <= end_line and cov[ti] is not None:
-                        sources[cov[ti]] = sources.get(cov[ti], 0) + 1
-                src = max(sources, key=sources.get) if sources else None
-                planned.append((cut_line, end_line, src))
+                att = next((j for j in range(cut_line, end_line + 1)
+                            if attrib[j]), None)
+                named = (_named_author(lines[att][2], authors, mi)
+                         if att is not None else None)
+                # covered prose ABOVE the attribution line: when it is a
+                # short run repeated from the SAME author's earlier message,
+                # it is their signature -- split it into its own fold. Any
+                # other head prose means the attribution does not actually
+                # head the quote, so its name cannot label the fold either.
+                head_prose = ([j for j in range(cut_line, att)
+                               if exact[j] and not furn[j] and nw[j]]
+                              if att is not None else [])
+                sig_end = None
+                if head_prose and authors:
+                    head_cov = sum(nc[j] for j in range(cut_line, att))
+                    # who INTRODUCED the head's words: ``cov`` (latest-wins)
+                    # would name whoever re-quoted the signature most
+                    # recently, masking that it is the author's own.
+                    cov0 = (_coverage(ws, origin) if origin is not None
+                            else cov)
+                    head_srcs = {cov0[ti] for ti, (_, ln) in enumerate(toks)
+                                 if cut_line <= ln < att
+                                 and cov0[ti] is not None}
+                    if (head_cov >= _MIN_TAIL_COVERED
+                            and covered - head_cov >= _MIN_TAIL_COVERED
+                            and sum(1 for j in range(cut_line, att)
+                                    if not blank[j]) <= _MAX_SIG_LINES
+                            and all(authors[s] == authors[mi]
+                                    for s in head_srcs)
+                            and any(exact[j] and nw[j]
+                                    for j in range(att, end_line + 1))):
+                        sig_end = att - 1
+                    else:
+                        named = None
+                elif head_prose:
+                    named = None
+                if sig_end is not None:
+                    # the sig fold's provenance is who INTRODUCED the words
+                    # (cov0), not who repeated them last -- its label is the
+                    # fixed string "signature", but src must not lie either.
+                    planned.append((cut_line, sig_end,
+                                    _hist_src(cut_line, sig_end, cov0), "sig"))
+                    planned.append((att, end_line,
+                                    named if named is not None
+                                    else _hist_src(att, end_line), "q"))
+                else:
+                    planned.append((cut_line, end_line,
+                                    named if named is not None
+                                    else _hist_src(cut_line, end_line), "q"))
         i += 1
 
-    hidden_lines = {j for start, stop, _ in planned
+    hidden_lines = {j for start, stop, _, _ in planned
                     for j in range(start, stop + 1)}
     if sum(nw[j] for j in range(len(lines)) if j not in hidden_lines) \
             < _MIN_VISIBLE_WORDS:
@@ -324,8 +422,8 @@ def _plan(full, prior):
         (lines[start][0],
          None if all(blank[j] for j in range(stop + 1, len(lines)))
          else lines[stop][1],
-         src)
-        for start, stop, src in planned
+         src, kind)
+        for start, stop, src, kind in planned
     ]
 
 
@@ -374,6 +472,16 @@ def _materialize(body, segs, off):
             return None
         if parent is body:
             return cur
+        # Boundary at the parent's very start (nothing but its summary, for a
+        # fold built moments ago, sits before cur): the parent IS the
+        # boundary. Splitting instead would clone it -- an adjacent fold's
+        # end landing on the next fold's first text cloned a summary-less
+        # <details> that browsers label with their locale's default.
+        if (not (parent.text or "").strip()
+                and all(sib.tag == "summary" and not (sib.tail or "").strip()
+                        for sib in parent[:parent.index(cur)])):
+            cur = parent
+            continue
         wrapper = lhtml.Element(parent.tag, dict(parent.attrib))
         for sib in list(parent[parent.index(cur):]):
             wrapper.append(sib)                  # moves them (incl. cur)
@@ -389,24 +497,31 @@ def _materialize(body, segs, off):
         cur = wrapper
 
 
-def _fold_range(body, segs, cut, end, who):
+def _fold_range(body, segs, cut, end, who, kind="q"):
     """Wrap ``body``'s content from text offset ``cut`` to ``end`` (None =
-    the end of the message) in a <details class=q>. The END boundary is
-    materialized first -- splitting there cannot disturb offsets before it;
-    the start split then works on the already-shrunk segment snapshots."""
+    the end of the message) in a <details class=q> -- class="q sig" and a
+    "signature" label for a split-off repeated signature. The END boundary
+    is materialized first -- splitting there cannot disturb offsets before
+    it; the start split then works on the already-shrunk segment
+    snapshots."""
     stop = _materialize(body, segs, end) if end is not None else None
     cur = _materialize(body, segs, cut)
     if cur is None:
         return False
 
     det = lhtml.Element("details")
-    det.set("class", "q")
+    det.set("class", "q sig" if kind == "sig" else "q")
     summary = lhtml.Element("summary")
     arrow = lhtml.Element("span")
     arrow.set("class", "ar")
     arrow.text = "▸"
     summary.append(arrow)
-    if who:
+    if kind == "sig":
+        label = lhtml.Element("span")
+        label.set("class", "meta")
+        label.text = " signature"
+        summary.append(label)
+    elif who:
         label = lhtml.Element("span")
         label.set("class", "meta")
         label.text = f" quoted from {who}"
@@ -435,7 +550,8 @@ def fold_thread(bodies, authors):
     if lhtml is None:                          # no lxml -> no server-side folds
         return list(bodies)
     out = []
-    prior: dict = {}
+    prior: dict = {}                           # shingle -> latest sayer
+    origin: dict = {}                          # shingle -> first sayer
     for mi, raw in enumerate(bodies):
         folded = raw
         full = None
@@ -447,11 +563,11 @@ def fold_thread(bodies, authors):
                                and not (root.text or "").strip()) else root
             full, segs = _walk(body)
             if prior:
-                plans = _plan(full, prior)
-                for cut, end, src in reversed(plans):
+                plans = _plan(full, prior, authors, mi, origin)
+                for cut, end, src, kind in reversed(plans):
                     who = (authors[src]
                            if src is not None and 0 <= src < mi else None)
-                    _fold_range(body, segs, cut, end, who)
+                    _fold_range(body, segs, cut, end, who, kind)
                 if plans:
                     ser = lhtml.tostring(root, encoding="unicode")
                     folded = re.sub(r"^<x-fold>|</x-fold>$", "", ser)
@@ -466,5 +582,7 @@ def fold_thread(bodies, authors):
         ws = _norm_words(full) if full is not None else _norm_words(
             re.sub(r"<[^>]+>", " ", raw or ""))
         for j in range(len(ws) - K + 1):
-            prior[" ".join(ws[j:j + K])] = mi
+            g = " ".join(ws[j:j + K])
+            prior[g] = mi
+            origin.setdefault(g, mi)
     return out
