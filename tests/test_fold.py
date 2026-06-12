@@ -65,6 +65,23 @@ def test_fold_labels_name_the_quoted_author():
     ], got
 
 
+def test_signature_fold_src_is_who_introduced_it(monkeypatch):
+    """The sig fold's provenance (not rendered, but must not lie) is the
+    author who INTRODUCED the signature -- Jaime in msg 1 -- not spiderr,
+    who merely re-quoted it last in msg 2."""
+    import fold
+    calls = []
+    orig = fold._fold_range
+    monkeypatch.setattr(
+        fold, "_fold_range",
+        lambda body, segs, cut, end, who, kind="q":
+            calls.append((kind, who)) or orig(body, segs, cut, end, who, kind))
+    msgs = json.load(open(FIX))
+    bodies = [body_to_html(m["body"], m["body_html"]) for m in msgs]
+    fold.fold_thread(bodies, [m["from_name"] for m in msgs])
+    assert [w for k, w in calls if k == "sig"] == ["Jaime Kikpole"]
+
+
 def test_signature_fold_is_marked_and_holds_the_signature():
     """The split-off signature fold carries class="q sig" (the client script
     must neither merge it away nor auto-open it) and contains the repeated

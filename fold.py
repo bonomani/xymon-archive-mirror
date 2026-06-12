@@ -320,12 +320,13 @@ def _plan(full, prior, authors=(), mi=0, origin=None):
                        and hmatch[i].group(1).casefold() in _FROM_FIELDS))
               for i, (_, _, t) in enumerate(lines)]
 
-    def _hist_src(a, b):
+    def _hist_src(a, b, coverage=None):
         """Dominant earlier message among lines a..b's covered words."""
+        c = cov if coverage is None else coverage
         sources = {}
         for ti, (_, line_index) in enumerate(toks):
-            if a <= line_index <= b and cov[ti] is not None:
-                sources[cov[ti]] = sources.get(cov[ti], 0) + 1
+            if a <= line_index <= b and c[ti] is not None:
+                sources[c[ti]] = sources.get(c[ti], 0) + 1
         return max(sources, key=sources.get) if sources else None
 
     planned = []
@@ -398,8 +399,11 @@ def _plan(full, prior, authors=(), mi=0, origin=None):
                 elif head_prose:
                     named = None
                 if sig_end is not None:
+                    # the sig fold's provenance is who INTRODUCED the words
+                    # (cov0), not who repeated them last -- its label is the
+                    # fixed string "signature", but src must not lie either.
                     planned.append((cut_line, sig_end,
-                                    _hist_src(cut_line, sig_end), "sig"))
+                                    _hist_src(cut_line, sig_end, cov0), "sig"))
                     planned.append((att, end_line,
                                     named if named is not None
                                     else _hist_src(att, end_line), "q"))
